@@ -1,3 +1,6 @@
 Flask
 requests
 beautifulsoup4
+google-genai
+pydantic
+playwright
