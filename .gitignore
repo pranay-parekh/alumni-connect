@@ -1,0 +1,4 @@
+venv/
+alumni.db
+students.csv
+__pycache__/

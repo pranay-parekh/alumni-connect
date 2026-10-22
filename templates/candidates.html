@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head><title>Candidates</title></head>
+<body>
+  <h1>Alumni candidates ({{ rows|length }})</h1>
+  <table border="1" cellpadding="6">
+    <tr><th>#</th><th>Name</th><th>Branch</th><th>Status</th></tr>
+    {% for r in rows %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ r["name"] }}</td>
+      <td>{{ r["department"] }}</td>
+      <td>{{ "Verified" if r["verified"] else "Unverified" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</body>
+</html>
