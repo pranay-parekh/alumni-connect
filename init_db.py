@@ -29,6 +29,7 @@ CREATE TABLE alumni_profiles (
     skills TEXT,
     bio TEXT,
     source_url TEXT,
+    raw_designation TEXT,
     match_confidence REAL,
     verified INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (user_id) REFERENCES users (id)
