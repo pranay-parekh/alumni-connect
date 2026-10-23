@@ -4,9 +4,10 @@ General alumni scraper.
 Pipeline (cheapest first):
   1. Fetch page HTML (requests; Playwright fallback for JS-rendered apps)
   2. Parse Schema.org JSON-LD blocks (fast, zero API cost)
-  3. Strip boilerplate and clean text
-  4. Call Gemini Flash with structured JSON schema
-  5. Save deduplicated records to alumni.db
+  3. If JSON-LD found fewer than MIN_JSON_LD_PEOPLE people:
+       clean the text, split it into chunks, and ask Gemini to extract alumni
+  4. Follow "Next page" links (up to MAX_PAGES pages)
+  5. Save deduplicated records to alumni.db (alumni_profiles table)
 
 Usage:
   python scrape_alumni.py https://example.edu/alumni https://another-site.com/people
@@ -14,9 +15,12 @@ Usage:
 
 import json
 import os
+import re
 import sqlite3
 import sys
+import time
 from typing import List, Optional
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -29,8 +33,14 @@ import requests
 load_dotenv()
 
 DB_PATH = "alumni.db"
-MODEL = "gemini-3.8-flash"
-MAX_CHARS = 30000
+TABLE = "alumni_profiles"
+MODEL = "gemini-3.5-flash-lite"
+
+CHUNK_CHARS = 15000          # size of each piece of text sent to the AI
+MAX_CHUNKS_PER_PAGE = 6      # safety limit so one huge page can't cost too much
+MAX_PAGES = 5                # how many "Next" pages to follow per site
+MIN_JSON_LD_PEOPLE = 5       # if JSON-LD finds fewer than this, also use the AI
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -90,6 +100,7 @@ def from_json_ld(html: str) -> list[dict]:
                     "batch_year": None,
                     "company": company,
                     "role": node.get("jobTitle"),
+                    "department": None,
                     "location": None,
                     "profile_url": node.get("url"),
                 })
@@ -106,20 +117,40 @@ def from_json_ld(html: str) -> list[dict]:
     return people
 
 
-# ---------- Step 3: Clean HTML to Plain Text ----------
+# ---------- Step 3a: Clean HTML to Plain Text ----------
 def clean_text(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "svg"]):
         tag.decompose()
-    return soup.get_text("\n", strip=True)[:MAX_CHARS]
+    return soup.get_text("\n", strip=True)
 
 
-# ---------- Step 4: AI Extraction (Gemini) ----------
+def looks_like_login_page(text: str) -> bool:
+    start = text[:200].lower()
+    return "linkedin" in start and ("sign up" in start or "sign in" in start)
+
+
+# ---------- Step 3b: Split long text into chunks ----------
+def split_text(text: str, size: int = CHUNK_CHARS) -> list[str]:
+    """Cut text into pieces of about `size` characters, breaking on line ends."""
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        if current and len(current) + len(line) + 1 > size:
+            chunks.append(current)
+            current = ""
+        current += line + "\n"
+    if current.strip():
+        chunks.append(current)
+    return chunks[:MAX_CHUNKS_PER_PAGE]
+
+
+# ---------- Step 3c: AI Extraction (Gemini) ----------
 class AlumniRecord(BaseModel):
     name: str
     batch_year: Optional[str] = None
     company: Optional[str] = None
     role: Optional[str] = None
+    department: Optional[str] = None
     location: Optional[str] = None
     profile_url: Optional[str] = None
 
@@ -139,24 +170,33 @@ def from_llm(text: str) -> list[dict]:
     prompt = (
         "Extract every alumni, past student, faculty member, or listed person from this page. "
         "Only extract people explicitly mentioned in the text. "
+        "Also read each person's testimonial or description: if it states where they work, "
+        "fill in company and role; if it states their department or course "
+        "(for example CSE, MBA, B.Com), fill in department. "
         "Leave absent details as null. Do not guess or fabricate information.\n\n"
         f"{text}"
     )
 
-    try:
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=AlumniBatch,
-                temperature=0.0            ),
-        )
-        data = json.loads(response.text)
-        return data.get("alumni", [])
-    except Exception as e:
-        print(f"  Gemini call failed: {e}")
-        return []
+    for attempt in range(1, 4):  # try up to 3 times
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=AlumniBatch,
+                    temperature=0.0,
+                ),
+            )
+            data = json.loads(response.text)
+            return data.get("alumni", [])
+        except Exception as e:
+            print(f"  Gemini attempt {attempt} failed: {e}")
+            if attempt < 3:
+                wait = attempt * 10
+                print(f"  Retrying in {wait} seconds...")
+                time.sleep(wait)
+    return []
 
 
 # ---------- Safety check ----------
@@ -166,13 +206,43 @@ def looks_real(person: dict, text: str) -> bool:
     return bool(name) and name in text.lower()
 
 
+# ---------- Merge helper ----------
+def merge_people(first: list[dict], second: list[dict]) -> list[dict]:
+    """Combine two lists, skipping people whose name is already in the list."""
+    seen = {(p.get("name") or "").strip().lower() for p in first}
+    merged = list(first)
+    for p in second:
+        key = (p.get("name") or "").strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(p)
+    return merged
+
+
+# ---------- Step 4: Find the "Next page" link ----------
+NEXT_WORDS = {"next", "next page", "next »", "next ›", "»", "›", ">", "older"}
+
+
+def find_next_url(html: str, current_url: str) -> Optional[str]:
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Best signal: <a rel="next"> or <link rel="next">
+    for tag in soup.find_all(["a", "link"], href=True):
+        rel = tag.get("rel") or []
+        if "next" in [r.lower() for r in rel]:
+            return urljoin(current_url, tag["href"])
+
+    # Otherwise: a link whose visible text says "Next"
+    for a in soup.find_all("a", href=True):
+        label = a.get_text(" ", strip=True).lower()
+        if label in NEXT_WORDS and not a["href"].startswith(("#", "javascript:")):
+            return urljoin(current_url, a["href"])
+
+    return None
+
+
 # ---------- Step 5: Save to database ----------
-TABLE = "alumni_profiles"
-
-
 def save(people: list[dict], source_url: str) -> int:
-    import re
-
     conn = sqlite3.connect(DB_PATH)
     added = 0
     for p in people:
@@ -190,28 +260,70 @@ def save(people: list[dict], source_url: str) -> int:
 
         conn.execute(
             f"INSERT INTO {TABLE} "
-            "(name, company, job_role, batch_year, source_url, raw_designation, verified) "
-            "VALUES (?, ?, ?, ?, ?, ?, 0)",
-            (p["name"], p.get("company"), p.get("role"), year, source_url, p.get("role")),
+            "(name, company, job_role, department, batch_year, source_url, raw_designation, verified) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+            (p["name"], p.get("company"), p.get("role"), p.get("department"),
+             year, source_url, p.get("role")),
         )
         added += 1
     conn.commit()
     conn.close()
     return added
+
+
 # ---------- Put it together ----------
-def scrape(url: str) -> None:
-    print(f"Scraping {url}")
+def scrape_page(url: str) -> tuple[list[dict], str]:
+    """Get the alumni from ONE page. Returns (people, html)."""
     html = fetch_html(url)
 
     people = from_json_ld(html)
     if people:
-        print(f"  Found {len(people)} people in JSON-LD (no AI used)")
-    else:
-        text = clean_text(html)
-        people = [p for p in from_llm(text) if looks_real(p, text)]
-        print(f"  AI extracted {len(people)} people")
+        print(f"  Found {len(people)} people in JSON-LD")
 
-    print(f"  Saved {save(people, url)} new rows to {DB_PATH}")
+    if len(people) < MIN_JSON_LD_PEOPLE:
+        text = clean_text(html)
+        print(f"  Page text length: {len(text)} characters")
+        if looks_like_login_page(text):
+            print("  This looks like a login page, so there is no public data to scrape. Skipping.")
+            return people, html
+
+        ai_people = []
+        for i, chunk in enumerate(split_text(text), start=1):
+            print(f"  Sending chunk {i} to Gemini...")
+            found = [p for p in from_llm(chunk) if looks_real(p, text)]
+            print(f"  AI chunk {i}: extracted {len(found)} people")
+            ai_people = merge_people(ai_people, found)
+        people = merge_people(people, ai_people)
+
+    return people, html
+
+
+def scrape(start_url: str) -> None:
+    print(f"Scraping {start_url}")
+    url = start_url
+    visited = set()
+    total_saved = 0
+
+    for page_number in range(1, MAX_PAGES + 1):
+        if url in visited:
+            break
+        visited.add(url)
+        print(f" Page {page_number}: {url}")
+
+        people, html = scrape_page(url)
+        if not people:
+            break  # nothing here, so stop following "Next" links
+
+        saved = save(people, start_url)
+        total_saved += saved
+        print(f"  Saved {saved} new rows")
+
+        url = find_next_url(html, url)
+        if not url:
+            break
+        time.sleep(1)  # be polite to the website
+
+    print(f"Done. {total_saved} new rows saved to {DB_PATH}")
 
 
 if __name__ == "__main__":
