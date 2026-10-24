@@ -167,12 +167,16 @@ def from_llm(text: str) -> list[dict]:
 
     client = genai.Client(api_key=api_key)
 
-    prompt = (
-        "Extract every alumni, past student, faculty member, or listed person from this page. "
-        "Only extract people explicitly mentioned in the text. "
-        "Also read each person's testimonial or description: if it states where they work, "
-        "fill in company and role; if it states their department or course "
-        "(for example CSE, MBA, B.Com), fill in department. "
+      prompt = (
+        "Extract one record for each alumnus or alumna listed on this page, "
+        "including the authors of testimonials. "
+        "Do NOT include people who are only mentioned or thanked inside someone else's text "
+        "(for example professors or guides). "
+        "Use the job title and organisation printed under a person's name as the main source "
+        "for role and company; only if none is printed, read that person's own testimonial. "
+        "Never copy details from a different person's entry. "
+        "role must be a real job title; if the person is not currently working, leave role empty. "
+        "Fill batch_year and department only if the page states them for that same person. "
         "Leave absent details as null. Do not guess or fabricate information.\n\n"
         f"{text}"
     )
