@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% from "_macros.html" import csrf, spine, job_line, skill_chips, status_pill %}
+{% block title %}{{ alumnus.name }} - Alumni Connect{% endblock %}
+
+{% block content %}
+{% set verified = alumnus.verified in (1, true, '1') %}
+{% set is_student = current_user.is_authenticated and current_user.role == 'student' %}
+{% set own = is_own_profile|default(false) %}
+
+<div class="container page">
+  <a class="back-link" href="{{ url_for('search.index') }}">Back to search</a>
+
+  <div class="profile-layout">
+    <article class="profile-card">
+      {{ spine(alumnus.batch_year) }}
+      <div class="profile-main">
+        {% if not verified %}
+          <p class="notice">This profile is waiting for admin approval and is not visible in search yet.</p>
+        {% endif %}
+        <h1>{{ alumnus.name }}</h1>
+        <p class="profile-job">{{ job_line(alumnus) }}</p>
+        <p class="profile-dept">{{ alumnus.department }}</p>
+
+        {% if alumnus.bio %}
+          <section class="profile-section">
+            <h2>About</h2>
+            <p>{{ alumnus.bio }}</p>
+          </section>
+        {% endif %}
+
+        {% if alumnus.skills %}
+          <section class="profile-section">
+            <h2>Skills</h2>
+            {{ skill_chips(alumnus.skills) }}
+          </section>
+        {% endif %}
+
+        {% if not alumnus.bio and not alumnus.skills %}
+          <p class="muted">This alumnus hasn't added a bio or skills yet.</p>
+        {% endif %}
+      </div>
+    </article>
+
+    <aside class="side-panel" aria-label="Mentorship request">
+      {% if own %}
+        <h2>This is your profile</h2>
+        <p>Students see exactly what is shown here.</p>
+        <a class="btn" href="{{ url_for('auth.claim_profile') }}">Edit profile</a>
+
+      {% elif not current_user.is_authenticated %}
+        <h2>Want to reach {{ alumnus.name.split(' ')[0] }}?</h2>
+        <p>Log in with a student account to send a mentorship request.</p>
+        <a class="btn" href="{{ url_for('auth.login', next=request.path) }}">Log in</a>
+
+      {% elif not is_student %}
+        <h2>Mentorship requests</h2>
+        <p>Only student accounts can send requests.</p>
+
+      {% elif not verified %}
+        <h2>Not open yet</h2>
+        <p>Requests open once an admin approves this profile.</p>
+
+      {% elif existing_request %}
+        <h2>Your request</h2>
+        <p>{{ status_pill(existing_request.status) }}</p>
+        {% if existing_request.status == 'pending' %}
+          <p>Sent. {{ alumnus.name.split(' ')[0] }} will accept or reject it from their account.</p>
+        {% elif existing_request.status == 'accepted' %}
+          <p>{{ alumnus.name.split(' ')[0] }} accepted your request.</p>
+        {% else %}
+          <p>{{ alumnus.name.split(' ')[0] }} couldn't take this one on.</p>
+        {% endif %}
+        <a class="btn btn-quiet" href="{{ url_for('connections.my_requests') }}">See all my requests</a>
+
+      {% else %}
+        <h2>Send a request</h2>
+        <p>Say who you are and what you'd like help with. Keep it short and specific.</p>
+        <form method="post" action="{{ url_for('connections.send_request', alumni_id=alumnus.id) }}">
+          {{ csrf() }}
+          <div class="field">
+            <label for="message">Your message</label>
+            <textarea class="textarea" id="message" name="message" required maxlength="500"
+                      data-counter="message-count"
+                      placeholder="Hi, I'm in my third year of Mechanical. I'm preparing for interviews in product roles and would like your advice."></textarea>
+            <div class="counter" id="message-count" aria-live="off"></div>
+          </div>
+          <button class="btn" type="submit">Send request</button>
+        </form>
+      {% endif %}
+    </aside>
+  </div>
+</div>
+{% endblock %}
