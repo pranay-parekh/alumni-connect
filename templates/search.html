@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% from "_macros.html" import alumnus_card %}
+{% block title %}Find alumni - Alumni Connect{% endblock %}
+
+{% block content %}
+{% set q = request.args.get('q', '') %}
+{% set sel_dept = request.args.get('department', '') %}
+{% set sel_year = request.args.get('batch_year', '') %}
+{% set filtered = q or sel_dept or sel_year %}
+
+<section class="hero">
+  <div class="container">
+    <h1>Find an alumnus who is already where you want to be.</h1>
+    <p>Every profile here has been checked by an admin. Search by name, company or skill, then send a mentorship request.</p>
+  </div>
+</section>
+
+<div class="container page-end">
+  <div class="search-panel">
+    <form class="search-form" method="get" action="{{ url_for('search.index') }}" role="search">
+      <div class="field">
+        <label for="q">Name, company or skill</label>
+        <input class="input" type="search" id="q" name="q" value="{{ q }}" placeholder="For example: data analyst">
+      </div>
+
+      <div class="field">
+        <label for="department">Department</label>
+        <select class="select" id="department" name="department">
+          <option value="">All departments</option>
+          {% for d in departments|default([]) %}
+            <option value="{{ d }}" {% if sel_dept == d|string %}selected{% endif %}>{{ d }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="batch_year">Batch year</label>
+        <select class="select" id="batch_year" name="batch_year">
+          <option value="">Any year</option>
+          {% for y in batch_years|default([]) %}
+            <option value="{{ y }}" {% if sel_year == y|string %}selected{% endif %}>{{ y }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <button class="btn" type="submit">Search</button>
+    </form>
+  </div>
+
+  <div class="results-head">
+    <h2 aria-live="polite">
+      {% if alumni|length == 1 %}1 alumnus{% else %}{{ alumni|length }} alumni{% endif %}
+      {%- if filtered %} found{% endif %}
+    </h2>
+    {% if filtered %}
+      <a href="{{ url_for('search.index') }}">Clear filters</a>
+    {% endif %}
+  </div>
+
+  {% if alumni %}
+    <ul class="card-grid">
+      {% for a in alumni %}
+        {{ alumnus_card(a) }}
+      {% endfor %}
+    </ul>
+  {% else %}
+    <div class="empty">
+      <h2>{% if filtered %}No alumni match those filters{% else %}No verified alumni yet{% endif %}</h2>
+      <p>
+        {% if filtered %}Try a shorter keyword, or search all departments and years.
+        {% else %}Profiles show up here once an admin approves them.{% endif %}
+      </p>
+      {% if filtered %}<a class="btn btn-quiet" href="{{ url_for('search.index') }}">Clear filters</a>{% endif %}
+    </div>
+  {% endif %}
+
+</div>
+{% endblock %}

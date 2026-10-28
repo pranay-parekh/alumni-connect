@@ -36,7 +36,7 @@ DB_PATH = "alumni.db"
 TABLE = "alumni_profiles"
 MODEL = "gemini-3.5-flash-lite"
 
-CHUNK_CHARS = 15000          # size of each piece of text sent to the AI
+CHUNK_CHARS = 20000          # size of each piece of text sent to the AI
 MAX_CHUNKS_PER_PAGE = 6      # safety limit so one huge page can't cost too much
 MAX_PAGES = 5                # how many "Next" pages to follow per site
 MIN_JSON_LD_PEOPLE = 5       # if JSON-LD finds fewer than this, also use the AI
@@ -167,7 +167,7 @@ def from_llm(text: str) -> list[dict]:
 
     client = genai.Client(api_key=api_key)
 
-      prompt = (
+    prompt = (
         "Extract one record for each alumnus or alumna listed on this page, "
         "including the authors of testimonials. "
         "Do NOT include people who are only mentioned or thanked inside someone else's text "

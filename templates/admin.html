@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% from "_macros.html" import csrf, confidence, job_line %}
+{% block title %}Verify alumni - Alumni Connect{% endblock %}
+
+{% block content %}
+<div class="container page">
+  <div class="page-head">
+    <h1>Verify alumni</h1>
+    <p>These profiles came from the college pages. Approve the ones that look right so students can find them. Low match scores are marked in amber.</p>
+  </div>
+
+  <ul class="admin-summary" aria-label="Totals">
+    <li><strong>{{ pending|length }}</strong> waiting</li>
+    <li><strong>{{ counts.approved|default(0) }}</strong> approved</li>
+    <li><strong>{{ counts.rejected|default(0) }}</strong> rejected</li>
+  </ul>
+
+  {% if pending %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col">Department</th>
+            <th scope="col">Batch</th>
+            <th scope="col">Job</th>
+            <th scope="col">Match score</th>
+            <th scope="col"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in pending %}
+            <tr>
+              <td class="cell-name" data-label="Name">
+                {% if a.source_url %}<a href="{{ a.source_url }}" target="_blank" rel="noopener noreferrer">{{ a.name }}</a>{% else %}{{ a.name }}{% endif %}
+              </td>
+              <td data-label="Department">{{ a.department }}</td>
+              <td data-label="Batch">{{ a.batch_year }}</td>
+              <td data-label="Job">{{ job_line(a) }}</td>
+              <td data-label="Match score">{{ confidence(a.confidence) }}</td>
+              <td class="cell-actions">
+                <form method="post" action="{{ url_for('admin.verify', alumni_id=a.id) }}">
+                  {{ csrf() }}
+                  <button class="btn btn-small" type="submit" name="action" value="approve">Approve</button>
+                </form>
+                <form method="post" action="{{ url_for('admin.verify', alumni_id=a.id) }}">
+                  {{ csrf() }}
+                  <button class="btn btn-small btn-danger" type="submit" name="action" value="reject"
+                          data-confirm="Reject {{ a.name }}? They will not appear in search.">Reject</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty">
+      <h2>Nothing waiting for review</h2>
+      <p>Every profile has been approved or rejected.</p>
+      <a class="btn btn-quiet" href="{{ url_for('search.index') }}">See what students see</a>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}
