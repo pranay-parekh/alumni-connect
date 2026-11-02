@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% from "_macros.html" import csrf, spine, job_line, skill_chips %}
+{% block title %}Recommended alumni - Alumni Connect{% endblock %}
+
+{% block head %}
+<style>
+  .match { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; }
+  .match-bar { flex: 1; max-width: 140px; height: 8px; border-radius: 99px; background: var(--brand-tint); overflow: hidden; }
+  .match-fill { display: block; height: 100%; background: var(--brand); }
+  .match-pct { font-weight: 700; color: var(--brand-dark); }
+  .match-reasons { margin: 8px 0 10px; padding-left: 18px; color: var(--muted); font-size: 0.92rem; }
+  .match-reasons li { margin-bottom: 2px; }
+  .rec-form-grid { display: grid; gap: 0 16px; grid-template-columns: 1fr; }
+  @media (min-width: 720px) { .rec-form-grid { grid-template-columns: 1fr 1fr; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container container-narrow page">
+
+  <div class="page-head">
+    <h1>Alumni picked for you</h1>
+    <p>Tell us your skills and where you want to go. We score every approved alumnus and show the best five, with the reasons.</p>
+  </div>
+
+  <form class="auth-card auth-card-wide" method="post" action="{{ url_for('recommend.recommend_page') }}">
+    {{ csrf() }}
+    <div class="rec-form-grid">
+      <div class="field">
+        <label for="skills">Your skills</label>
+        <input class="input" type="text" id="skills" name="skills" maxlength="300"
+               value="{{ me['skills'] or '' }}" placeholder="Python, SQL, Data analysis">
+        <p class="hint">Separate with commas.</p>
+      </div>
+      <div class="field">
+        <label for="interests">Career interests</label>
+        <input class="input" type="text" id="interests" name="interests" maxlength="300"
+               value="{{ me['interests'] or '' }}" placeholder="Data analyst, Cybersecurity">
+        <p class="hint">Roles or fields you want to work in.</p>
+      </div>
+      <div class="field">
+        <label for="branch">Your branch</label>
+        <input class="input" type="text" id="branch" name="branch" maxlength="100"
+               value="{{ me['branch'] or '' }}" placeholder="CSE">
+      </div>
+    </div>
+    <button class="btn" type="submit">Save and find alumni</button>
+  </form>
+
+  <div class="results-head">
+    <h2>{% if results %}Top {{ results|length }} for you{% else %}Your matches{% endif %}</h2>
+  </div>
+
+  {% if results %}
+    <ul class="card-grid">
+      {% for r in results %}
+        {% set a = r.alumnus %}
+        <li>
+          <article class="alum">
+            {{ spine(a['batch_year']) }}
+            <div class="alum-body">
+              <p class="match">
+                <span class="match-pct">{{ r.score }}% match</span>
+                <span class="match-bar" aria-hidden="true"><span class="match-fill" style="width: {{ r.score }}%"></span></span>
+              </p>
+              <h3 class="alum-name"><a href="{{ url_for('search.profile', alumni_id=a['id']) }}">{{ a['name'] }}</a></h3>
+              <p class="alum-job">{{ job_line(a) }}</p>
+              <ul class="match-reasons">
+                {% for reason in r.reasons %}<li>{{ reason }}</li>{% endfor %}
+              </ul>
+              {{ skill_chips(a['skills'], 4) }}
+            </div>
+          </article>
+        </li>
+      {% endfor %}
+    </ul>
+  {% elif has_profile %}
+    <div class="empty">
+      <h2>No approved alumni match yet</h2>
+      <p>Try broader skills or interests, or check back once an admin approves more profiles.</p>
+    </div>
+  {% else %}
+    <div class="empty">
+      <h2>Fill in your profile first</h2>
+      <p>Add at least your skills, interests or branch above and your top five will appear here.</p>
+    </div>
+  {% endif %}
+
+</div>
+{% endblock %}

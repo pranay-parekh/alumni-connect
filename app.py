@@ -1,19 +1,24 @@
 """Alumni Connect: the real app. It reads the same alumni.db your scraper writes to.
 
-Run:  pip install flask flask-login
+Run:  pip install flask flask-login flask-wtf python-dotenv
       python app.py
 """
 import os
 import sqlite3
 from contextlib import closing
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from flask import (Blueprint, Flask, abort, flash, redirect, render_template,
                    request, url_for)
 from flask_login import (LoginManager, UserMixin, current_user, login_required,
                          login_user, logout_user)
+from flask_wtf.csrf import CSRFProtect
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from admin import bp as admin_bp
+from recommend import recommend as recommend_alumni
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "alumni.db")
@@ -56,6 +61,12 @@ def ensure_schema():
              WHERE id = OLD.id;
         END;
         """)
+        # Student profile columns used by the recommender (added once, safe to re-run)
+        have = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+        for col in ("skills", "interests", "branch"):
+            if col not in have:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+        conn.commit()
 
 
 def my_profile_id(user_id):
@@ -143,17 +154,26 @@ def claim_profile():
 
     if request.method == "POST":
         with closing(db()) as conn, conn:
-            if pid is None:  # step 1: "This is me" (only unclaimed, scraped rows)
+            if request.form.get("create_new"):  # not in the scraped list: start a blank profile
+                if pid is None:                 # (ignored if a profile already exists, e.g. double-click)
+                    conn.execute("INSERT INTO alumni_profiles (user_id, name, verified) VALUES (?, ?, 0)",
+                                 (uid, current_user.name))
+                    flash("Profile created. Add your details below.", "success")
+            elif pid is None:  # step 1: "This is me" (only unclaimed, scraped rows)
                 cur = conn.execute(
                     "UPDATE alumni_profiles SET user_id = ? WHERE id = ? AND user_id IS NULL",
                     (uid, request.form.get("alumni_id")))
                 flash("Profile linked. Add your details below." if cur.rowcount
                       else "That profile was already claimed.", "success" if cur.rowcount else "error")
             else:            # step 2: fill in details
+                year = request.form.get("batch_year", "").strip()
                 conn.execute(
-                    "UPDATE alumni_profiles SET company = ?, job_role = ?, skills = ?, bio = ? WHERE id = ?",
+                    "UPDATE alumni_profiles SET company = ?, job_role = ?, skills = ?, bio = ?, "
+                    "department = ?, batch_year = ? WHERE id = ?",
                     (request.form.get("company", ""), request.form.get("role", ""),
-                     request.form.get("skills", ""), request.form.get("bio", ""), pid))
+                     request.form.get("skills", ""), request.form.get("bio", ""),
+                     request.form.get("department", "").strip(),
+                     int(year) if year.isdigit() and len(year) == 4 else None, pid))
                 flash("Profile saved. An admin will review it.", "success")
         return redirect(url_for("auth.claim_profile"))
 
@@ -246,11 +266,15 @@ def my_requests():
     if current_user.role == "admin":
         flash("Admins don't send or receive requests.", "info")
         return redirect(url_for("admin.dashboard"))
+    # Join the alumni's user account so we can show their email on acceptance.
+    # alumni_email is only shown when status = 'accepted' (the alumnus's consent).
     base = ("SELECT r.id, r.status, r.message, r.created_at, r.alumni_id, "
             "a.name AS alumni_name, a.role AS alumni_role, a.company AS alumni_company, "
-            "u.name AS student_name "
+            "u.name AS student_name, "
+            "CASE WHEN r.status = 'accepted' THEN au.email ELSE NULL END AS alumni_email "
             "FROM mentorship_requests r JOIN alumni a ON a.id = r.alumni_id "
-            "JOIN users u ON u.id = r.student_id ")
+            "JOIN users u ON u.id = r.student_id "
+            "LEFT JOIN users au ON au.id = a.user_id ")
     with closing(db()) as conn:
         if current_user.role == "student":
             rows = conn.execute(base + "WHERE r.student_id = ? ORDER BY r.id DESC", (int(current_user.id),)).fetchall()
@@ -279,10 +303,43 @@ def respond(request_id):
     return redirect(url_for("connections.my_requests"))
 
 
+# ---------------------------------------------------------------- recommend
+recommend_bp = Blueprint("recommend", __name__)
+
+
+@recommend_bp.route("/recommend", methods=["GET", "POST"])
+@login_required
+def recommend_page():
+    if current_user.role != "student":
+        flash("Recommendations are for student accounts.", "info")
+        return redirect(url_for("search.index"))
+    uid = int(current_user.id)
+
+    if request.method == "POST":  # save the student's profile, then show fresh results
+        with closing(db()) as conn, conn:
+            conn.execute("UPDATE users SET skills = ?, interests = ?, branch = ? WHERE id = ?",
+                         (request.form.get("skills", "").strip()[:300],
+                          request.form.get("interests", "").strip()[:300],
+                          request.form.get("branch", "").strip()[:100], uid))
+        flash("Profile saved.", "success")
+        return redirect(url_for("recommend.recommend_page"))
+
+    with closing(db()) as conn:
+        me = conn.execute("SELECT skills, interests, branch FROM users WHERE id = ?", (uid,)).fetchone()
+        approved = conn.execute("SELECT * FROM alumni WHERE verified = 1").fetchall()
+    has_profile = any((me["skills"], me["interests"], me["branch"]))
+    results = recommend_alumni(me, approved) if has_profile else []
+    return render_template("recommend.html", me=me, results=results, has_profile=has_profile)
+
+
 # ---------------------------------------------------------------- app set-up
 def create_app():
     app = Flask(__name__)
-    app.config.update(SECRET_KEY=os.getenv("SECRET_KEY", "dev-only-change-me"), DATABASE=DB_PATH)
+    app.config.update(
+        SECRET_KEY=os.getenv("SECRET_KEY", "dev-only-change-me"),
+        DATABASE=DB_PATH,
+    )
+    CSRFProtect(app)
     ensure_schema()
 
     manager = LoginManager(app)
@@ -296,7 +353,7 @@ def create_app():
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return User(row) if row else None
 
-    for bp in (auth, search, connections, admin_bp):
+    for bp in (auth, search, connections, recommend_bp, admin_bp):
         app.register_blueprint(bp)
     return app
 
@@ -304,4 +361,4 @@ def create_app():
 app = create_app()
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)

@@ -3,3 +3,4 @@ alumni.db
 students.csv
 __pycache__/
 .env
+*.db

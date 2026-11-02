@@ -29,6 +29,16 @@
     <form class="auth-card auth-card-wide" method="post" action="{{ url_for('auth.claim_profile') }}">
       {{ csrf() }}
       <div class="field">
+        <label for="department">Department</label>
+        <input class="input" type="text" id="department" name="department" maxlength="120"
+               value="{{ request.form.get('department', alumnus.department or '') }}" placeholder="Computer Science and Engineering">
+      </div>
+      <div class="field">
+        <label for="batch_year">Batch year</label>
+        <input class="input" type="text" id="batch_year" name="batch_year" maxlength="4" inputmode="numeric"
+               value="{{ request.form.get('batch_year', alumnus.batch_year or '') }}" placeholder="2022">
+      </div>
+      <div class="field">
         <label for="company">Company</label>
         <input class="input" type="text" id="company" name="company" maxlength="120"
                value="{{ request.form.get('company', alumnus.company or '') }}" autocomplete="organization">
@@ -80,9 +90,17 @@
     {% else %}
       <div class="empty">
         <h2>No matching profile found</h2>
-        <p>We couldn't find an unclaimed profile under the name on your account. Ask an admin to check the alumni list.</p>
+        <p>We couldn't find an unclaimed profile under the name on your account.</p>
       </div>
     {% endif %}
+
+    <form method="post" action="{{ url_for('auth.claim_profile') }}" style="margin-top: 24px;">
+      {{ csrf() }}
+      <input type="hidden" name="create_new" value="1">
+      <p class="muted">{% if candidates %}None of these is you?{% else %}Not on the list?{% endif %}
+        Create a new profile instead. An admin reviews it before students can see it.</p>
+      <button class="btn btn-quiet" type="submit">Create a new profile</button>
+    </form>
   {% endif %}
 
 </div>

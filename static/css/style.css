@@ -521,6 +521,18 @@ a:hover { color: var(--brand-dark); }
 .request-actions form { margin: 0; }
 .list-title { margin: 24px 0 12px; font-size: 1.15rem; }
 
+/* Contact details shown after acceptance */
+.request-contact {
+  margin: 10px 0 0;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--ok-tint);
+  color: var(--ok);
+  font-weight: 500;
+  font-size: 0.95rem;
+}
+.request-contact a { color: var(--brand-dark); }
+
 /* ---------- Admin page ---------- */
 .admin-summary { display: flex; flex-wrap: wrap; gap: 4px 24px; margin: 0 0 20px; padding: 0; list-style: none; }
 .admin-summary li { color: var(--muted); }

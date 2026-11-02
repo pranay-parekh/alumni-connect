@@ -25,6 +25,14 @@
 
     {% if r.message %}<p class="request-message">{{ r.message }}</p>{% endif %}
 
+    {# Show alumni contact email once the request is accepted (acceptance = consent) #}
+    {% if not is_alumnus and r.status == 'accepted' and r.alumni_email %}
+      <p class="request-contact">
+        <strong>Contact:</strong>
+        <a href="mailto:{{ r.alumni_email }}">{{ r.alumni_email }}</a>
+      </p>
+    {% endif %}
+
     {% if is_alumnus and r.status == 'pending' %}
       <div class="request-actions">
         <form method="post" action="{{ url_for('connections.respond', request_id=r.id) }}">

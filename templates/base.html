@@ -24,6 +24,8 @@
           <li><a class="nav-link" href="{{ url_for('search.index') }}"
                  {% if endpoint in ('search.index', 'search.profile') %}aria-current="page"{% endif %}>Find alumni</a></li>
           {% if current_user.role == 'student' %}
+            <li><a class="nav-link" href="{{ url_for('recommend.recommend_page') }}"
+                   {% if endpoint.startswith('recommend.') %}aria-current="page"{% endif %}>For you</a></li>
             <li><a class="nav-link" href="{{ url_for('connections.my_requests') }}"
                    {% if endpoint.startswith('connections.') %}aria-current="page"{% endif %}>My requests</a></li>
           {% elif current_user.role == 'alumni' %}
