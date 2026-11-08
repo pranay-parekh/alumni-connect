@@ -18,6 +18,7 @@ from flask_wtf.csrf import CSRFProtect
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from admin import bp as admin_bp
+from bootstrap_db import ensure_db
 from recommend import recommend as recommend_alumni
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -340,6 +341,7 @@ def create_app():
         DATABASE=DB_PATH,
     )
     CSRFProtect(app)
+    ensure_db()        # fresh server with no alumni.db? restore the demo DB first
     ensure_schema()
 
     manager = LoginManager(app)
