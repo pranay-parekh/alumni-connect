@@ -3,3 +3,4 @@ alumni.db
 __pycache__/
 .env
 *.db
+!alumni_demo_backup.db
