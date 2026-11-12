@@ -34,7 +34,7 @@ load_dotenv()
 
 DB_PATH = "alumni.db"
 TABLE = "alumni_profiles"
-MODEL = "gemini-3.5-flash-lite"
+MODEL = "gemini-4-hydrogen"
 
 CHUNK_CHARS = 20000          # size of each piece of text sent to the AI
 MAX_CHUNKS_PER_PAGE = 6      # safety limit so one huge page can't cost too much
@@ -280,24 +280,18 @@ def scrape_page(url: str) -> tuple[list[dict], str]:
     """Get the alumni from ONE page. Returns (people, html)."""
     html = fetch_html(url)
 
-    people = from_json_ld(html)
-    if people:
-        print(f"  Found {len(people)} people in JSON-LD")
+    text = clean_text(html)
+    print(f"  Page text length: {len(text)} characters")
+    if looks_like_login_page(text):
+        print("  This looks like a login page, so there is no public data to scrape. Skipping.")
+        return [], html
 
-    if len(people) < MIN_JSON_LD_PEOPLE:
-        text = clean_text(html)
-        print(f"  Page text length: {len(text)} characters")
-        if looks_like_login_page(text):
-            print("  This looks like a login page, so there is no public data to scrape. Skipping.")
-            return people, html
-
-        ai_people = []
-        for i, chunk in enumerate(split_text(text), start=1):
-            print(f"  Sending chunk {i} to Gemini...")
-            found = [p for p in from_llm(chunk) if looks_real(p, text)]
-            print(f"  AI chunk {i}: extracted {len(found)} people")
-            ai_people = merge_people(ai_people, found)
-        people = merge_people(people, ai_people)
+    people = []
+    for i, chunk in enumerate(split_text(text), start=1):
+        print(f"  Sending chunk {i} to Gemini...")
+        found = [p for p in from_llm(chunk) if looks_real(p, text)]
+        print(f"  AI chunk {i}: extracted {len(found)} people")
+        people = merge_people(people, found)
 
     return people, html
 
