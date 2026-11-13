@@ -1,18 +1,8 @@
 """
 General alumni scraper.
-
-Pipeline (cheapest first):
-  1. Fetch page HTML (requests; Playwright fallback for JS-rendered apps)
-  2. Parse Schema.org JSON-LD blocks (fast, zero API cost)
-  3. If JSON-LD found fewer than MIN_JSON_LD_PEOPLE people:
-       clean the text, split it into chunks, and ask Gemini to extract alumni
-  4. Follow "Next page" links (up to MAX_PAGES pages)
-  5. Save deduplicated records to alumni.db (alumni_profiles table)
-
 Usage:
   python scrape_alumni.py https://example.edu/alumni https://another-site.com/people
 """
-
 import json
 import os
 import re
@@ -39,7 +29,6 @@ MODEL = "gemini-4-hydrogen"
 CHUNK_CHARS = 20000          # size of each piece of text sent to the AI
 MAX_CHUNKS_PER_PAGE = 6      # safety limit so one huge page can't cost too much
 MAX_PAGES = 5                # how many "Next" pages to follow per site
-MIN_JSON_LD_PEOPLE = 5       # if JSON-LD finds fewer than this, also use the AI
 
 HEADERS = {
     "User-Agent": (
@@ -78,46 +67,7 @@ def fetch_html(url: str) -> str:
     return html
 
 
-# ---------- Step 2: Extract Schema.org JSON-LD ----------
-def from_json_ld(html: str) -> list[dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    people = []
-
-    def walk(node):
-        if isinstance(node, list):
-            for item in node:
-                walk(item)
-        elif isinstance(node, dict):
-            if node.get("@type") == "Person" and node.get("name"):
-                works_for = node.get("worksFor")
-                company = (
-                    works_for.get("name")
-                    if isinstance(works_for, dict)
-                    else works_for
-                )
-                people.append({
-                    "name": str(node["name"]).strip(),
-                    "batch_year": None,
-                    "company": company,
-                    "role": node.get("jobTitle"),
-                    "department": None,
-                    "location": None,
-                    "profile_url": node.get("url"),
-                })
-            for value in node.values():
-                if isinstance(value, (list, dict)):
-                    walk(value)
-
-    for tag in soup.find_all("script", type="application/ld+json"):
-        try:
-            walk(json.loads(tag.string or ""))
-        except (json.JSONDecodeError, TypeError):
-            continue
-
-    return people
-
-
-# ---------- Step 3a: Clean HTML to Plain Text ----------
+# ---------- Step 2: Clean HTML to Plain Text ----------
 def clean_text(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "svg"]):
