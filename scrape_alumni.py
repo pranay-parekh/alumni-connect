@@ -262,12 +262,14 @@ def save(people: list[dict], source_url: str) -> int:
         match = re.search(r"\d{4}", str(p.get("batch_year") or ""))
         year = int(match.group()) if match else None
 
+        filled = sum(bool(p.get(k)) for k in ("role", "company", "department", "batch_year"))
+        conf = round(0.45 + 0.13 * filled, 2)
         conn.execute(
             f"INSERT INTO {TABLE} "
-            "(name, company, job_role, department, batch_year, source_url, raw_designation, verified) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+            "(name, company, job_role, department, batch_year, source_url, raw_designation, match_confidence, verified) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
             (p["name"], p.get("company"), p.get("role"), p.get("department"),
-             year, source_url, p.get("role")),
+             year, source_url, p.get("role"), conf),
         )
         added += 1
     conn.commit()
@@ -312,7 +314,7 @@ def scrape(start_url: str) -> None:
         if not people:
             break  # nothing here, so stop following "Next" links
 
-        saved = save(people, start_url)
+        saved = save(people, url)
         total_saved += saved
         print(f"  Saved {saved} new rows")
 

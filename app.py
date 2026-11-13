@@ -166,21 +166,25 @@ def claim_profile():
                     (uid, request.form.get("alumni_id")))
                 flash("Profile linked. Add your details below." if cur.rowcount
                       else "That profile was already claimed.", "success" if cur.rowcount else "error")
-            else:            # step 2: fill in details
+            else:            # step 2: fill in details and queue for admin review
                 year = request.form.get("batch_year", "").strip()
                 conn.execute(
                     "UPDATE alumni_profiles SET company = ?, job_role = ?, skills = ?, bio = ?, "
-                    "department = ?, batch_year = ? WHERE id = ?",
-                    (request.form.get("company", ""), request.form.get("role", ""),
-                     request.form.get("skills", ""), request.form.get("bio", ""),
-                     request.form.get("department", "").strip(),
+                    "department = ?, batch_year = ?, verified = 0 WHERE id = ?",
+                    (request.form.get("company", "").strip() or None,
+                     request.form.get("role", "").strip() or None,
+                     request.form.get("skills", "").strip() or None,
+                     request.form.get("bio", "").strip() or None,
+                     request.form.get("department", "").strip() or None,
                      int(year) if year.isdigit() and len(year) == 4 else None, pid))
                 flash("Profile saved. An admin will review it.", "success")
         return redirect(url_for("auth.claim_profile"))
 
     with closing(db()) as conn:
         if pid is None:
-            first = current_user.name.split()[0]
+            tokens = [t for t in current_user.name.split()
+                      if t.rstrip(".").lower() not in ("dr", "mr", "ms", "mrs", "prof") and len(t.rstrip(".")) > 1]
+            first = tokens[0] if tokens else current_user.name.split()[0]
             candidates = conn.execute(
                 "SELECT * FROM alumni WHERE user_id IS NULL AND COALESCE(verified, 0) >= 0 AND name LIKE ?",
                 (f"%{first}%",)).fetchall()

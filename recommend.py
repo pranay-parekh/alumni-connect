@@ -91,9 +91,8 @@ def score_one(student, alumnus, this_year=None):
 
     # 2. Career interests (where the student wants to go vs what the alumnus does)
     interests = _items(_get(student, "interests"))
-    pool = _words(" ".join(str(_get(alumnus, k) or "") for k in
-                           ("role", "company", "bio", "skills")))
-    hit = [name for name, w in interests if w <= pool]
+    fields = [_words(str(_get(alumnus, k) or "")) for k in ("role", "company", "skills", "bio")]
+    hit = [name for name, w in interests if any(w <= f for f in fields)]
     if hit:
         points += WEIGHTS["interests"] * len(hit) / len(interests)
         reasons.append("Matches your interest in " + ", ".join(hit))
