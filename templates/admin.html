@@ -1,53 +1,150 @@
 {% extends "base.html" %}
 {% from "_macros.html" import csrf, confidence, job_line %}
-{% block title %}Verify alumni - Alumni Connect{% endblock %}
+{% block title %}Admin - Alumni Connect{% endblock %}
+{# While a scrape is running, reload every few seconds so the result shows up by itself #}
+{% block head %}{% if scrape_active %}<meta http-equiv="refresh" content="6">{% endif %}{% endblock %}
 
 {% block content %}
 <div class="container page">
   <div class="page-head">
-    <h1>Verify alumni</h1>
-    <p>These profiles came from the college pages. Approve the ones that look right so students can find them. Low match scores are marked in amber.</p>
+    <h1>Admin</h1>
+    <p>Review the alumni we collected, fix mistakes, and approve the ones that look right so students can find them.</p>
   </div>
 
-  <ul class="admin-summary" aria-label="Totals">
-    <li><strong>{{ pending|length }}</strong> waiting</li>
-    <li><strong>{{ counts.approved|default(0) }}</strong> approved</li>
-    <li><strong>{{ counts.rejected|default(0) }}</strong> rejected</li>
+  {# ---------- numbers ---------- #}
+  <ul class="stat-grid" aria-label="Totals">
+    <li class="stat"><strong>{{ stats.pending }}</strong><span>Waiting for review</span></li>
+    <li class="stat"><strong>{{ stats.approved }}</strong><span>Approved alumni</span></li>
+    <li class="stat"><strong>{{ stats.rejected }}</strong><span>Rejected</span></li>
+    <li class="stat"><strong>{{ stats.students }}</strong><span>Students signed up</span></li>
+    <li class="stat"><strong>{{ stats.claimed }}</strong><span>Profiles claimed by alumni</span></li>
+    <li class="stat"><strong>{{ stats.req_pending }}</strong><span>Requests open
+      <small>({{ stats.req_accepted }} accepted, {{ stats.req_rejected }} declined)</small></span></li>
   </ul>
 
-  {% if pending %}
+  {# ---------- scrape with Gemini ---------- #}
+  <section class="panel" aria-labelledby="scrape-title">
+    <h2 id="scrape-title">Scrape a page</h2>
+    <p class="muted">Paste the address of a public alumni page. Gemini reads it and adds the people it finds to <strong>Waiting</strong>. Pages that need a login will not work.</p>
+    <form class="scrape-form" method="post" action="{{ url_for('admin.scrape') }}">
+      {{ csrf() }}
+      <label class="sr-only" for="scrape-url">Alumni page address</label>
+      <input class="input" type="url" id="scrape-url" name="url" placeholder="https://college.edu/alumni" required maxlength="500"
+             {% if scrape_active %}disabled{% endif %}>
+      <button class="btn" type="submit" {% if scrape_active %}disabled{% endif %}>
+        {% if scrape_active %}Scrape running...{% else %}Scrape with Gemini{% endif %}
+      </button>
+    </form>
+
+    {% if jobs %}
+      <div class="table-wrap table-wrap-flat">
+        <table class="table table-compact">
+          <thead>
+            <tr><th scope="col">Page</th><th scope="col">Status</th><th scope="col">Result</th><th scope="col">Started (UTC)</th></tr>
+          </thead>
+          <tbody>
+            {% for j in jobs %}
+              <tr>
+                <td class="cell-url" data-label="Page"><a href="{{ j.url }}" target="_blank" rel="noopener noreferrer">{{ j.url }}</a></td>
+                <td data-label="Status">
+                  {% if j.status == 'done' %}<span class="pill pill-accepted">Done</span>
+                  {% elif j.status == 'failed' %}<span class="pill pill-rejected">Failed</span>
+                  {% else %}<span class="pill pill-pending">{{ 'Running' if j.status == 'running' else 'Queued' }}</span>{% endif %}
+                </td>
+                <td data-label="Result">{{ j.message or 'Working...' }}</td>
+                <td data-label="Started (UTC)">{{ j.created_at }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  </section>
+
+  {# ---------- review lists ---------- #}
+  <nav class="tabs" aria-label="Profile lists">
+    <a class="tab" href="{{ url_for('admin.dashboard', view='pending') }}" {% if view == 'pending' %}aria-current="page"{% endif %}>Waiting <span class="tab-count">{{ stats.pending }}</span></a>
+    <a class="tab" href="{{ url_for('admin.dashboard', view='approved') }}" {% if view == 'approved' %}aria-current="page"{% endif %}>Approved <span class="tab-count">{{ stats.approved }}</span></a>
+    <a class="tab" href="{{ url_for('admin.dashboard', view='rejected') }}" {% if view == 'rejected' %}aria-current="page"{% endif %}>Rejected <span class="tab-count">{{ stats.rejected }}</span></a>
+  </nav>
+
+  <form class="admin-search" method="get" action="{{ url_for('admin.dashboard') }}">
+    <input type="hidden" name="view" value="{{ view }}">
+    <label class="sr-only" for="admin-q">Search this list</label>
+    <input class="input" type="search" id="admin-q" name="q" value="{{ q }}" placeholder="Search name, company, role or department">
+    <button class="btn btn-quiet" type="submit">Search</button>
+    {% if q %}<a class="btn btn-quiet" href="{{ url_for('admin.dashboard', view=view) }}">Clear</a>{% endif %}
+  </form>
+
+  {% if rows %}
+    {# One bulk form; the row checkboxes below point at it with form="bulk-form" #}
+    <form id="bulk-form" class="bulk-bar" method="post" action="{{ url_for('admin.bulk') }}">
+      {{ csrf() }}
+      <input type="hidden" name="view" value="{{ view }}">
+      <span class="bulk-label">With the ticked profiles:</span>
+      {% if view == 'pending' %}
+        <button class="btn btn-small" type="submit" name="action" value="approve" data-confirm="Approve every ticked profile?">Approve</button>
+        <button class="btn btn-small btn-danger" type="submit" name="action" value="reject" data-confirm="Reject every ticked profile? They will not appear in search.">Reject</button>
+      {% elif view == 'approved' %}
+        <button class="btn btn-small btn-danger" type="submit" name="action" value="pending" data-confirm="Take every ticked profile out of search and move it back to Waiting?">Unpublish</button>
+      {% else %}
+        <button class="btn btn-small" type="submit" name="action" value="pending">Move back to Waiting</button>
+      {% endif %}
+    </form>
+
     <div class="table-wrap">
       <table class="table">
         <thead>
           <tr>
+            <th scope="col" class="cell-check"><input type="checkbox" id="select-all" aria-label="Tick every profile in this list"></th>
             <th scope="col">Name</th>
             <th scope="col">Department</th>
             <th scope="col">Batch</th>
             <th scope="col">Job</th>
             <th scope="col">Match score</th>
+            <th scope="col">Source</th>
             <th scope="col"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
-          {% for a in pending %}
+          {% for a in rows %}
             <tr>
-              <td class="cell-name" data-label="Name">
-                {% if a.source_url %}<a href="{{ a.source_url }}" target="_blank" rel="noopener noreferrer">{{ a.name }}</a>{% else %}{{ a.name }}{% endif %}
+              <td class="cell-check" data-label="Tick">
+                <input type="checkbox" name="ids" value="{{ a.id }}" form="bulk-form" aria-label="Tick {{ a.name }}">
               </td>
+              <td class="cell-name" data-label="Name">{{ a.name }}</td>
               <td data-label="Department">{{ a.department }}</td>
               <td data-label="Batch">{{ a.batch_year }}</td>
               <td data-label="Job">{{ job_line(a) }}</td>
               <td data-label="Match score">{{ confidence(a.confidence) }}</td>
+              <td data-label="Source">
+                {% if a.source_url %}<a href="{{ a.source_url }}" target="_blank" rel="noopener noreferrer">Open page</a>
+                {% else %}<span class="muted">Added by the alumnus</span>{% endif %}
+              </td>
               <td class="cell-actions">
-                <form method="post" action="{{ url_for('admin.verify', alumni_id=a.id) }}">
-                  {{ csrf() }}
-                  <button class="btn btn-small" type="submit" name="action" value="approve">Approve</button>
-                </form>
-                <form method="post" action="{{ url_for('admin.verify', alumni_id=a.id) }}">
-                  {{ csrf() }}
-                  <button class="btn btn-small btn-danger" type="submit" name="action" value="reject"
-                          data-confirm="Reject {{ a.name }}? They will not appear in search.">Reject</button>
-                </form>
+                <a class="btn btn-small btn-quiet" href="{{ url_for('admin.edit', alumni_id=a.id, view=view) }}">Edit</a>
+                {% if view == 'pending' %}
+                  <form method="post" action="{{ url_for('admin.verify', alumni_id=a.id) }}">
+                    {{ csrf() }}<input type="hidden" name="view" value="{{ view }}">
+                    <button class="btn btn-small" type="submit" name="action" value="approve">Approve</button>
+                  </form>
+                  <form method="post" action="{{ url_for('admin.verify', alumni_id=a.id) }}">
+                    {{ csrf() }}<input type="hidden" name="view" value="{{ view }}">
+                    <button class="btn btn-small btn-danger" type="submit" name="action" value="reject"
+                            data-confirm="Reject {{ a.name }}? They will not appear in search.">Reject</button>
+                  </form>
+                {% elif view == 'approved' %}
+                  <form method="post" action="{{ url_for('admin.verify', alumni_id=a.id) }}">
+                    {{ csrf() }}<input type="hidden" name="view" value="{{ view }}">
+                    <button class="btn btn-small btn-danger" type="submit" name="action" value="pending"
+                            data-confirm="Unpublish {{ a.name }}? They will leave search and go back to Waiting.">Unpublish</button>
+                  </form>
+                {% else %}
+                  <form method="post" action="{{ url_for('admin.verify', alumni_id=a.id) }}">
+                    {{ csrf() }}<input type="hidden" name="view" value="{{ view }}">
+                    <button class="btn btn-small" type="submit" name="action" value="pending">Move back to Waiting</button>
+                  </form>
+                {% endif %}
               </td>
             </tr>
           {% endfor %}
@@ -56,10 +153,34 @@
     </div>
   {% else %}
     <div class="empty">
-      <h2>Nothing waiting for review</h2>
-      <p>Every profile has been approved or rejected.</p>
+      {% if q %}
+        <h2>No matches</h2>
+        <p>Nothing in this list matches "{{ q }}".</p>
+      {% elif view == 'pending' %}
+        <h2>Nothing waiting for review</h2>
+        <p>Every profile has been approved or rejected. Scrape a page above to find more.</p>
+      {% elif view == 'approved' %}
+        <h2>No approved alumni yet</h2>
+        <p>Approve profiles from the Waiting list and they will show up in search.</p>
+      {% else %}
+        <h2>No rejected profiles</h2>
+        <p>Rejected profiles are kept here so the same name is not reviewed twice.</p>
+      {% endif %}
       <a class="btn btn-quiet" href="{{ url_for('search.index') }}">See what students see</a>
     </div>
   {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // "Tick all" in the table header
+  (function () {
+    var all = document.getElementById("select-all");
+    if (!all) return;
+    all.addEventListener("change", function () {
+      document.querySelectorAll('input[name="ids"]').forEach(function (box) { box.checked = all.checked; });
+    });
+  })();
+</script>
 {% endblock %}

@@ -19,7 +19,7 @@
         {% if current_user.is_authenticated %}
           {% if current_user.role == 'admin' %}
             <li><a class="nav-link" href="{{ url_for('admin.dashboard') }}"
-                   {% if endpoint.startswith('admin.') %}aria-current="page"{% endif %}>Verify alumni</a></li>
+                   {% if endpoint.startswith('admin.') %}aria-current="page"{% endif %}>Admin</a></li>
           {% endif %}
           <li><a class="nav-link" href="{{ url_for('search.index') }}"
                  {% if endpoint in ('search.index', 'search.profile') %}aria-current="page"{% endif %}>Find alumni</a></li>

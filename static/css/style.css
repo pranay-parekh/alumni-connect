@@ -608,3 +608,65 @@ a:hover { color: var(--brand-dark); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* ---------- Admin extras: stats, scrape box, tabs, bulk bar ---------- */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 0 0 24px; padding: 0; list-style: none; }
+.stat {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.stat strong { font-family: var(--font-display); font-size: 1.9rem; line-height: 1.1; color: var(--brand-dark); }
+.stat span { color: var(--muted); font-size: 0.92rem; }
+.stat small { display: block; font-size: 0.8rem; }
+
+.panel {
+  margin: 0 0 28px;
+  padding: 18px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.panel h2 { font-size: 1.25rem; }
+.panel > .muted { margin-bottom: 12px; max-width: 70ch; }
+.scrape-form { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.scrape-form .input { flex: 1 1 280px; width: auto; }
+.table-wrap-flat { box-shadow: none; }
+.table-compact th, .table-compact td { padding: 8px 12px; font-size: 0.92rem; }
+.cell-url { max-width: 320px; overflow-wrap: anywhere; }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 14px; border-bottom: 2px solid var(--line); }
+.tab {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 14px; margin-bottom: -2px;
+  border-bottom: 3px solid transparent;
+  color: var(--muted); font-weight: 600; text-decoration: none;
+}
+.tab:hover { color: var(--brand-dark); }
+.tab[aria-current="page"] { color: var(--brand-dark); border-bottom-color: var(--mark); }
+.tab-count {
+  padding: 1px 8px; border-radius: 999px;
+  background: var(--brand-tint); color: var(--brand-dark);
+  font-size: 0.82rem; font-variant-numeric: tabular-nums;
+}
+
+.admin-search { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }
+.admin-search .input { flex: 1 1 260px; width: auto; }
+
+.bulk-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 10px; padding: 10px 14px;
+  background: var(--brand-tint); border-radius: var(--radius-sm);
+}
+.bulk-label { color: var(--brand-dark); font-weight: 600; font-size: 0.95rem; }
+.table .cell-check { width: 44px; text-align: center; }
+.table .cell-check input { width: 18px; height: 18px; accent-color: var(--brand); }
+.table .cell-actions .btn { margin-right: 4px; }
+.form-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.edit-source { margin: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+  .table .cell-check { width: 100%; text-align: right; }
+}

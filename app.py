@@ -20,6 +20,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from admin import bp as admin_bp
 from bootstrap_db import ensure_db
 from recommend import recommend as recommend_alumni
+from scrape_alumni import JOBS_SCHEMA
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "alumni.db")
@@ -62,6 +63,7 @@ def ensure_schema():
              WHERE id = OLD.id;
         END;
         """)
+        conn.executescript(JOBS_SCHEMA)   # admin "Scrape a page" history
         # Student profile columns used by the recommender (added once, safe to re-run)
         have = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
         for col in ("skills", "interests", "branch"):

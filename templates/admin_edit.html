@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% from "_macros.html" import csrf, confidence %}
+{% block title %}Edit {{ form.name }} - Alumni Connect{% endblock %}
+
+{% block content %}
+<div class="container container-narrow page">
+  <div class="page-head">
+    <h1>Edit profile</h1>
+    <p>Fix anything the scraper got wrong, then save. "Save and approve" also puts the profile in search.</p>
+  </div>
+
+  <form class="auth-card auth-card-wide" method="post" action="{{ url_for('admin.edit', alumni_id=person.id) }}">
+    {{ csrf() }}
+    <input type="hidden" name="view" value="{{ view }}">
+
+    <div class="field">
+      <label for="name">Name</label>
+      <input class="input" type="text" id="name" name="name" maxlength="120" required value="{{ form.name }}">
+    </div>
+    <div class="field">
+      <label for="department">Department</label>
+      <input class="input" type="text" id="department" name="department" maxlength="120" value="{{ form.department }}" placeholder="Computer Science and Engineering">
+    </div>
+    <div class="field">
+      <label for="batch_year">Batch year</label>
+      <input class="input" type="text" id="batch_year" name="batch_year" maxlength="4" inputmode="numeric" value="{{ form.batch_year }}" placeholder="2022">
+    </div>
+    <div class="field">
+      <label for="company">Company</label>
+      <input class="input" type="text" id="company" name="company" maxlength="120" value="{{ form.company }}">
+    </div>
+    <div class="field">
+      <label for="role">Role</label>
+      <input class="input" type="text" id="role" name="role" maxlength="120" value="{{ form.role }}">
+    </div>
+    <div class="field">
+      <label for="skills">Skills</label>
+      <input class="input" type="text" id="skills" name="skills" maxlength="300" value="{{ form.skills }}">
+      <p class="hint">Separate skills with commas, for example: Python, Data analysis.</p>
+    </div>
+    <div class="field">
+      <label for="bio">Short bio</label>
+      <textarea class="textarea" id="bio" name="bio" maxlength="600" data-counter="bio-count">{{ form.bio }}</textarea>
+      <div class="counter" id="bio-count" aria-live="off"></div>
+    </div>
+
+    <div class="field">
+      <span class="label">Where it came from</span>
+      <p class="muted edit-source">
+        {% if person.source_url %}<a href="{{ person.source_url }}" target="_blank" rel="noopener noreferrer">{{ person.source_url }}</a>
+        {% else %}Added by the alumnus, not scraped.{% endif %}
+        {% if person.match_confidence is not none %} &middot; match score {{ confidence(person.match_confidence) }}{% endif %}
+      </p>
+    </div>
+
+    <div class="form-actions">
+      <button class="btn" type="submit" name="action" value="save">Save</button>
+      {% if person.verified != 1 %}
+        <button class="btn btn-quiet" type="submit" name="action" value="save_approve">Save and approve</button>
+      {% endif %}
+      <a class="btn btn-quiet" href="{{ url_for('admin.dashboard', view=view) }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
