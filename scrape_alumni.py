@@ -61,7 +61,7 @@ DEFAULT_MODE = os.getenv("SCRAPE_MODE", "auto").strip().lower()
 CHUNK_CHARS = 20000          # size of each piece of text sent to the AI in local mode
 MAX_CHUNKS_PER_PAGE = 6      # safety limit so one huge page can't cost too much
 MAX_PAGES = 5                # how many "Next" pages to follow per site
-REQUEST_TIMEOUT_MS = 120_000
+REQUEST_TIMEOUT_MS = 320_000
 TRIES = 3                    # Gemini is asked up to 3 times if it fails
 
 HEADERS = {
@@ -121,6 +121,10 @@ def _text(value) -> Optional[str]:
     value = str(value).strip()
     return None if value.lower() in ("", "null", "none", "n/a", "na", "unknown", "-") else value
 
+def _plain_name(name) -> str:
+    """Lower-case name without Mr./Ms./Dr./Prof. so 'Mr. Alan John' == 'Alan John'."""
+    name = re.sub(r"\s+", " ", (name or "").strip())
+    return re.sub(r"^(?:(?:mr|mrs|ms|dr|prof|maj)(?:\.\s*|\s+))+", "", name, flags=re.I).strip().lower()
 
 def clean_record(raw) -> Optional[dict]:
     """One alumnus from Gemini -> a tidy dict, or None if it isn't usable."""
@@ -139,10 +143,10 @@ def clean_record(raw) -> Optional[dict]:
 
 def merge_people(first: list[dict], second: list[dict]) -> list[dict]:
     """Combine two lists, skipping people whose name is already in the list."""
-    seen = {(p.get("name") or "").strip().lower() for p in first}
+    seen = {_plain_name(p.get("name")) for p in first}
     merged = list(first)
     for p in second:
-        key = (p.get("name") or "").strip().lower()
+        key = _plain_name(p.get("name"))
         if key and key not in seen:
             seen.add(key)
             merged.append(p)
@@ -434,14 +438,12 @@ def scrape_page(url: str, log: Callable = print) -> tuple[list[dict], str]:
 def save(people: list[dict], source_url: str, db_path: str = DB_PATH) -> int:
     added = 0
     with closing(sqlite3.connect(db_path, timeout=30)) as conn:
+        seen = {_plain_name(r[0]) for r in conn.execute(
+            f"SELECT name FROM {TABLE} WHERE source_url = ?", (source_url,))}
         for p in merge_people([], people):       # drops repeats within the same page
-            # skip if this person was already saved from this page
-            exists = conn.execute(
-                f"SELECT 1 FROM {TABLE} WHERE name = ? AND source_url = ?",
-                (p["name"], source_url),
-            ).fetchone()
-            if exists:
+            if _plain_name(p["name"]) in seen:
                 continue
+            seen.add(_plain_name(p["name"]))
 
             # batch_year is an INTEGER column, so pull out a 4-digit year if there is one
             match = re.search(r"\d{4}", str(p.get("batch_year") or ""))
