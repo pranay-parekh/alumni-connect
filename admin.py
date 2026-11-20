@@ -1,5 +1,5 @@
-"""Admin pages: review scraped alumni, fix them, approve or reject them, and
-start a scrape from the website.
+"""Admin pages: review scraped alumni, fix them, approve or reject them, discover
+by university name, import JSON/CSV, and start a scrape from the website.
 
 Hook it up in the main app (already done in app.py):
 
@@ -19,7 +19,7 @@ import threading
 from contextlib import closing
 from datetime import date
 from functools import wraps
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, url_for
 from flask_login import current_user, login_required
@@ -94,6 +94,28 @@ def _expire_stale_jobs(conn):
             (f"-{STALE_JOB_MINUTES} minutes",))
 
 
+def _format_job(row):
+    """Add a human-readable label and is_web_url flag for display in admin.html."""
+    item = dict(row)
+    raw = item["url"] or ""
+    if raw.startswith(("discover://", "xray://")):
+        parsed = urlparse(raw)
+        params = parse_qs(parsed.query)
+        univ = (params.get("university") or [""])[0]
+        parts = [univ]
+        if params.get("department"):
+            parts.append(params["department"][0])
+        if params.get("company"):
+            parts.append(params["company"][0])
+        prefix = "LinkedIn X-Ray" if raw.startswith("xray://") else "Google Search"
+        item["label"] = f"{prefix}: {' / '.join(p for p in parts if p)}"
+        item["is_web_url"] = False
+    else:
+        item["label"] = raw
+        item["is_web_url"] = True
+    return item
+
+
 # ---------------------------------------------------------------- dashboard
 @bp.route("/")
 @admin_required
@@ -111,8 +133,9 @@ def dashboard():
         _expire_stale_jobs(conn)
         rows = conn.execute(sql, args).fetchall()
         stats = _stats(conn)
-        jobs = conn.execute("SELECT * FROM scrape_jobs ORDER BY id DESC LIMIT 5").fetchall()
+        raw_jobs = conn.execute("SELECT * FROM scrape_jobs ORDER BY id DESC LIMIT 5").fetchall()
 
+    jobs = [_format_job(j) for j in raw_jobs]
     scrape_active = any(j["status"] in ("queued", "running") for j in jobs)
     return render_template("admin.html", rows=rows, view=view, q=q, stats=stats,
                            jobs=jobs, scrape_active=scrape_active)
@@ -217,7 +240,7 @@ def edit(alumni_id):
     return render_template("admin_edit.html", person=person, form=form, view=view)
 
 
-# -------------------------------------------------- scrape a page with Gemini
+# --------------------------------- background worker (scrape / discover / xray)
 def _mark_failed(db_path, job_id, message):
     with closing(sqlite3.connect(db_path, timeout=30)) as conn, conn:
         conn.execute("UPDATE scrape_jobs SET status = 'failed', message = ?, finished_at = datetime('now') "
@@ -237,6 +260,22 @@ def _start_worker(db_path, job_id):
     threading.Thread(target=work, name=f"scrape-job-{job_id}", daemon=True).start()
 
 
+def _queue_job(target_url, start_message):
+    db_path = _db_path()
+    with closing(_connect()) as conn:
+        _expire_stale_jobs(conn)
+        with conn:
+            busy = conn.execute("SELECT 1 FROM scrape_jobs WHERE status IN ('queued', 'running')").fetchone()
+            if busy:
+                flash("A scrape or discovery job is already running. Wait for it to finish, then try again.", "error")
+                return redirect(url_for("admin.dashboard"))
+            job_id = conn.execute("INSERT INTO scrape_jobs (url) VALUES (?)", (target_url,)).lastrowid
+
+    _start_worker(db_path, job_id)
+    flash(start_message, "success")
+    return redirect(url_for("admin.dashboard"))
+
+
 @bp.route("/scrape", methods=["POST"])
 @admin_required
 def scrape():
@@ -245,17 +284,56 @@ def scrape():
     if parsed.scheme not in ("http", "https") or not parsed.netloc or len(url) > 500:
         flash("Paste a full web address, starting with https://", "error")
         return redirect(url_for("admin.dashboard"))
+    return _queue_job(url, "Scrape started. New people will appear under Waiting when it finishes.")
 
-    db_path = _db_path()
-    with closing(_connect()) as conn:
-        _expire_stale_jobs(conn)
-        with conn:
-            busy = conn.execute("SELECT 1 FROM scrape_jobs WHERE status IN ('queued', 'running')").fetchone()
-            if busy:
-                flash("A scrape is already running. Wait for it to finish, then try again.", "error")
-                return redirect(url_for("admin.dashboard"))
-            job_id = conn.execute("INSERT INTO scrape_jobs (url) VALUES (?)", (url,)).lastrowid
 
-    _start_worker(db_path, job_id)
-    flash("Scrape started. New people will appear under Waiting when it finishes.", "success")
+@bp.route("/discover", methods=["POST"])
+@admin_required
+def discover():
+    university = request.form.get("university", "").strip()
+    department = request.form.get("department", "").strip()
+    company = request.form.get("company", "").strip()
+    mode = request.form.get("mode", "grounding")
+
+    if not university or len(university) > 160:
+        flash("Enter a university or college name.", "error")
+        return redirect(url_for("admin.dashboard"))
+
+    params = {"university": university}
+    if department:
+        params["department"] = department[:120]
+    if company:
+        params["company"] = company[:120]
+
+    try:
+        pages = max(1, min(5, int(request.form.get("pages", 3))))
+    except ValueError:
+        pages = 3
+    if mode == "xray":
+        params["pages"] = str(pages)
+    scheme = "xray" if mode == "xray" else "discover"
+    target = f"{scheme}://?{urlencode(params)}"
+    return _queue_job(target, f"Searching for '{university}' alumni. New people will appear under Waiting when it finishes.")
+
+
+@bp.route("/import", methods=["POST"])
+@admin_required
+def import_file():
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        flash("Choose a .json or .csv file to upload.", "error")
+        return redirect(url_for("admin.dashboard"))
+
+    try:
+        import scrape_alumni
+        added, skipped = scrape_alumni.import_from_file_content(
+            upload.read(), upload.filename, db_path=_db_path(), source_label=f"upload:{upload.filename}"
+        )
+        flash(
+            f"Imported {added} pending profile{'s' if added != 1 else ''} from {upload.filename} "
+            f"(skipped {skipped} duplicate{'s' if skipped != 1 else ''}).",
+            "success",
+        )
+    except Exception as e:
+        flash(f"Import failed: {e}", "error")
     return redirect(url_for("admin.dashboard"))

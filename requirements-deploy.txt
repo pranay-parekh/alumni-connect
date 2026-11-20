@@ -3,3 +3,7 @@ Flask-Login
 Flask-WTF
 python-dotenv
 gunicorn
+requests
+beautifulsoup4
+google-genai
+pydantic

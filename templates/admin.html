@@ -22,30 +22,89 @@
       <small>({{ stats.req_accepted }} accepted, {{ stats.req_rejected }} declined)</small></span></li>
   </ul>
 
-  {# ---------- scrape with Gemini ---------- #}
+  {# ---------- discover by university name ---------- #}
+  <section class="panel" aria-labelledby="discover-title">
+    <h2 id="discover-title">Discover by university name</h2>
+    <p class="muted">Search the web for alumni without needing a specific directory URL. Works on PythonAnywhere Free tier.</p>
+    <form method="post" action="{{ url_for('admin.discover') }}">
+      {{ csrf() }}
+      <div style="display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); align-items: end;">
+        <div class="field" style="margin-bottom: 0;">
+          <label for="discover-univ">University / College</label>
+          <input class="input" type="text" id="discover-univ" name="university" placeholder="e.g. Anna University" required maxlength="160"
+                 {% if scrape_active %}disabled{% endif %}>
+        </div>
+        <div class="field" style="margin-bottom: 0;">
+          <label for="discover-dept">Department (optional)</label>
+          <input class="input" type="text" id="discover-dept" name="department" placeholder="e.g. Computer Science" maxlength="120"
+                 {% if scrape_active %}disabled{% endif %}>
+        </div>
+        <div class="field" style="margin-bottom: 0;">
+          <label for="discover-company">Company (optional)</label>
+          <input class="input" type="text" id="discover-company" name="company" placeholder="e.g. Google" maxlength="120"
+                 {% if scrape_active %}disabled{% endif %}>
+        </div>
+        <div class="field" style="margin-bottom: 0;">
+          <label for="discover-mode">Method</label>
+          <select class="select" id="discover-mode" name="mode" {% if scrape_active %}disabled{% endif %}>
+            <option value="xray" selected>LinkedIn X-Ray Snippets (Serper)</option>
+            <option value="grounding">Google Search (Gemini)</option>
+          </select>
+        </div>
+        <div class="field" style="margin-bottom: 0;">
+          <label for="discover-pages">Depth (X-Ray)</label>
+          <select class="select" id="discover-pages" name="pages" {% if scrape_active %}disabled{% endif %}>
+            <option value="1">1 batch (~10)</option>
+            <option value="3" selected>3 batches (~30)</option>
+            <option value="5">5 batches (~50)</option>
+          </select>
+        </div>
+        <div>
+          <button class="btn" type="submit" style="width: 100%;" {% if scrape_active %}disabled{% endif %}>
+            {% if scrape_active %}Job running...{% else %}Discover alumni{% endif %}
+          </button>
+        </div>
+      </div>
+    </form>
+  </section>
+
+  {# ---------- scrape with Gemini + JSON/CSV import ---------- #}
   <section class="panel" aria-labelledby="scrape-title">
-    <h2 id="scrape-title">Scrape a page</h2>
-    <p class="muted">Paste the address of a public alumni page. Gemini reads it and adds the people it finds to <strong>Waiting</strong>. Pages that need a login will not work.</p>
+    <h2 id="scrape-title">Scrape a page or upload a batch</h2>
+    <p class="muted">Paste the address of a public alumni page, or upload a <code>.json</code> / <code>.csv</code> file exported locally. New profiles appear under <strong>Waiting</strong>.</p>
     <form class="scrape-form" method="post" action="{{ url_for('admin.scrape') }}">
       {{ csrf() }}
       <label class="sr-only" for="scrape-url">Alumni page address</label>
       <input class="input" type="url" id="scrape-url" name="url" placeholder="https://college.edu/alumni" required maxlength="500"
              {% if scrape_active %}disabled{% endif %}>
       <button class="btn" type="submit" {% if scrape_active %}disabled{% endif %}>
-        {% if scrape_active %}Scrape running...{% else %}Scrape with Gemini{% endif %}
+        {% if scrape_active %}Job running...{% else %}Scrape with Gemini{% endif %}
       </button>
+    </form>
+
+    <form class="scrape-form" method="post" action="{{ url_for('admin.import_file') }}" enctype="multipart/form-data" style="margin-top: 12px;">
+      {{ csrf() }}
+      <label class="sr-only" for="import-file">JSON or CSV file</label>
+      <input class="input" type="file" id="import-file" name="file" accept=".json,.csv" required>
+      <button class="btn btn-quiet" type="submit">Import JSON / CSV</button>
     </form>
 
     {% if jobs %}
       <div class="table-wrap table-wrap-flat">
         <table class="table table-compact">
           <thead>
-            <tr><th scope="col">Page</th><th scope="col">Status</th><th scope="col">Result</th><th scope="col">Started (UTC)</th></tr>
+            <tr><th scope="col">Source / Query</th><th scope="col">Status</th><th scope="col">Result</th><th scope="col">Started (UTC)</th></tr>
           </thead>
           <tbody>
             {% for j in jobs %}
               <tr>
-                <td class="cell-url" data-label="Page"><a href="{{ j.url }}" target="_blank" rel="noopener noreferrer">{{ j.url }}</a></td>
+                <td class="cell-url" data-label="Source / Query">
+                  {% if j.is_web_url %}
+                    <a href="{{ j.url }}" target="_blank" rel="noopener noreferrer">{{ j.label }}</a>
+                  {% else %}
+                    <strong>{{ j.label }}</strong>
+                  {% endif %}
+                </td>
                 <td data-label="Status">
                   {% if j.status == 'done' %}<span class="pill pill-accepted">Done</span>
                   {% elif j.status == 'failed' %}<span class="pill pill-rejected">Failed</span>
@@ -118,8 +177,13 @@
               <td data-label="Job">{{ job_line(a) }}</td>
               <td data-label="Match score">{{ confidence(a.confidence) }}</td>
               <td data-label="Source">
-                {% if a.source_url %}<a href="{{ a.source_url }}" target="_blank" rel="noopener noreferrer">Open page</a>
-                {% else %}<span class="muted">Added by the alumnus</span>{% endif %}
+                {% if a.source_url and a.source_url.startswith(('http://', 'https://')) %}
+                  <a href="{{ a.source_url }}" target="_blank" rel="noopener noreferrer">Open page</a>
+                {% elif a.source_url %}
+                  <span class="muted">{{ a.source_url }}</span>
+                {% else %}
+                  <span class="muted">Added by the alumnus</span>
+                {% endif %}
               </td>
               <td class="cell-actions">
                 <a class="btn btn-small btn-quiet" href="{{ url_for('admin.edit', alumni_id=a.id, view=view) }}">Edit</a>
@@ -158,7 +222,7 @@
         <p>Nothing in this list matches "{{ q }}".</p>
       {% elif view == 'pending' %}
         <h2>Nothing waiting for review</h2>
-        <p>Every profile has been approved or rejected. Scrape a page above to find more.</p>
+        <p>Every profile has been approved or rejected. Discover or scrape a page above to find more.</p>
       {% elif view == 'approved' %}
         <h2>No approved alumni yet</h2>
         <p>Approve profiles from the Waiting list and they will show up in search.</p>
