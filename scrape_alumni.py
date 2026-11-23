@@ -1,5 +1,5 @@
 """
-Unified alumni scraper, university discovery (Gemini Google Search + LinkedIn X-Ray),
+Unified alumni scraper, university discovery (LinkedIn X-Ray),
 and JSON/CSV bulk importer.
 
 Modes for URL scraping:
@@ -15,7 +15,6 @@ Usage:
   python scrape_alumni.py https://example.edu/alumni [https://another.edu/people ...]
   python scrape_alumni.py --local https://example.edu/alumni
   python scrape_alumni.py --gemini https://example.edu/alumni
-  python scrape_alumni.py --discover "Anna University" --dept "CSE"
   python scrape_alumni.py --xray "Anna University" --company "Google"
   python scrape_alumni.py --queue [--auto|--local|--gemini]
 
@@ -503,91 +502,7 @@ def scrape_page(url: str, log: Callable = print) -> tuple[list[dict], str]:
 
 
 # ==============================================================================
-# Discovery Mode 1: University Name Search via Gemini Google Search Grounding
-# ==============================================================================
-def discover_by_university(
-    university: str,
-    department: Optional[str] = None,
-    company: Optional[str] = None,
-    db_path: str = DB_PATH,
-    log: Callable = print,
-    out_file: Optional[str] = None,
-) -> dict:
-    """Use Gemini with Google Search grounding to discover alumni of a university.
-    Works on PythonAnywhere Free tier because it only calls googleapis.com."""
-    university = (university or "").strip()
-    if not university:
-        raise ScrapeError("Enter a university or college name.")
-
-    client = _client()
-    from google.genai import types
-
-    filters = []
-    if department:
-        filters.append(f"department/field: {department.strip()}")
-    if company:
-        filters.append(f"company: {company.strip()}")
-    filter_text = f" ({', '.join(filters)})" if filters else ""
-
-    search_prompt = (
-        f"Search the web for publicly listed alumni of '{university}'{filter_text}. "
-        "List real alumni you find in the search results. For each person, state their full name, "
-        "current job role, company, department/branch, graduation/batch year (if shown), skills/domain, "
-        "and the exact source URL where they appear. Only include real people verified in search results."
-    )
-
-    try:
-        grounded = client.models.generate_content(
-            model=MODEL,
-            contents=search_prompt,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                temperature=0.0,
-            ),
-        )
-    except Exception as e:
-        message = str(e).replace(os.getenv("GEMINI_API_KEY", "\0"), "***")
-        raise ScrapeError(f"Google Search grounding failed ({MODEL}): {message[:260]}")
-
-    grounded_text = grounded.text or ""
-    source_urls = []
-    try:
-        meta = grounded.candidates[0].grounding_metadata
-        for chunk in getattr(meta, "grounding_chunks", []) or []:
-            web = getattr(chunk, "web", None)
-            if web and getattr(web, "uri", None):
-                source_urls.append(f"- {getattr(web, 'title', '')}: {web.uri}")
-    except Exception:
-        pass
-
-    combined = grounded_text
-    if source_urls:
-        combined += "\n\nGrounded source URLs:\n" + "\n".join(source_urls)
-
-    extracted = [
-        p for p in from_llm(
-            combined,
-            log=log,
-            extra_instruction="Match each alumnus to the most relevant URL from 'Grounded source URLs' if known.",
-        )
-        if looks_real(p, grounded_text)
-    ]
-    # looks_real() only checks Gemini's own text, so also require a real web link as evidence.
-    people = [p for p in extracted if (p.get("profile_url") or "").startswith(("http://", "https://"))]
-    if len(people) < len(extracted):
-        log(f"  Dropped {len(extracted) - len(people)} people that had no source URL.")
-
-    if out_file:
-        with open(out_file, "w", encoding="utf-8") as f:
-            json.dump({"university": university, "alumni": people}, f, indent=2)
-        return {"pages": 1, "found": len(people), "saved": 0}
-
-    saved = save(people, f"google-search:{university}", db_path=db_path)
-    return {"pages": 1, "found": len(people), "saved": saved}
-
-
-# ==============================================================================
-# Discovery Mode 2: LinkedIn X-Ray Snippets via Serper (google.serper.dev)
+# Discovery: LinkedIn X-Ray Snippets via Serper (google.serper.dev)
 # ==============================================================================
 _STAFF_ROLE_WORDS = (
     "professor", "lecturer", "vice chancellor", "vice-chancellor", "pro vice",
@@ -1322,7 +1237,7 @@ def _finish(db_path: str, job_id: int, status: str, message: str, result: Option
 
 
 def run_job(job_id: int, db_path: str = DB_PATH, mode: Optional[str] = None) -> None:
-    """Run one queued job (http/https URL, discover://, or xray://). Safe to call twice."""
+    """Run one queued job (http/https URL or xray://). Safe to call twice."""
     with closing(sqlite3.connect(db_path, timeout=30)) as conn, conn:
         claimed = conn.execute(
             "UPDATE scrape_jobs SET status = 'running' WHERE id = ? AND status = 'queued'",
@@ -1334,7 +1249,9 @@ def run_job(job_id: int, db_path: str = DB_PATH, mode: Optional[str] = None) -> 
     target = row[0]
     started = time.monotonic()
     try:
-        if target.startswith(("discover://", "xray://")):
+        if target.startswith("discover://"):
+            raise ScrapeError("Google Search discovery was removed. Use the LinkedIn X-Ray method instead.")
+        if target.startswith("xray://"):
             parsed = urlparse(target)
             params = parse_qs(parsed.query)
             university = (params.get("university") or [""])[0]
@@ -1344,12 +1261,9 @@ def run_job(job_id: int, db_path: str = DB_PATH, mode: Optional[str] = None) -> 
                 req_pages = max(1, min(5, int((params.get("pages") or ["3"])[0])))
             except ValueError:
                 req_pages = 3
-            if target.startswith("xray://"):
-                result = xray_search_alumni(
-                    university, department=department, company=company, pages=req_pages, db_path=db_path
-                )
-            else:
-                result = discover_by_university(university, department=department, company=company, db_path=db_path)
+            result = xray_search_alumni(
+                university, department=department, company=company, pages=req_pages, db_path=db_path
+            )
             elapsed_str = _fmt_elapsed(time.monotonic() - started)
             if not result["found"]:
                 message = f"No alumni found for '{university}' ({elapsed_str})."
@@ -1402,21 +1316,15 @@ if __name__ == "__main__":
     parser.add_argument("--local", action="store_const", const="local", dest="mode")
     parser.add_argument("--gemini", action="store_const", const="gemini", dest="mode")
     parser.add_argument("--queue", action="store_true", help="Run all queued jobs in scrape_jobs")
-    parser.add_argument("--discover", help="Discover alumni by university name (Gemini Google Search)")
     parser.add_argument("--xray", help="Discover alumni by university name (LinkedIn X-Ray CSE)")
-    parser.add_argument("--dept", help="Optional department filter for --discover / --xray")
-    parser.add_argument("--company", help="Optional company filter for --discover / --xray")
+    parser.add_argument("--dept", help="Optional department filter for --xray")
+    parser.add_argument("--company", help="Optional company filter for --xray")
     parser.add_argument("--pages", type=int, default=3, help="Searches to run for --xray (1-5, 10 results each)")
     parser.add_argument("--out", help="Export scraped/discovered records to a JSON file instead of DB")
     args = parser.parse_args()
     if args.out and len(args.urls) > 1:
         parser.error("--out works with one URL at a time (each URL would overwrite the same file).")
 
-    if args.discover:
-        t0 = time.monotonic()
-        res = discover_by_university(args.discover, department=args.dept, company=args.company, out_file=args.out)
-        print(f"{res} (time taken: {_fmt_elapsed(time.monotonic() - t0)})")
-        sys.exit(0)
     if args.xray:
         res = xray_search_alumni(
             args.xray, department=args.dept, company=args.company, pages=args.pages, out_file=args.out

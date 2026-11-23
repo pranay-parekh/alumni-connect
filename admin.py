@@ -293,7 +293,6 @@ def discover():
     university = request.form.get("university", "").strip()
     department = request.form.get("department", "").strip()
     company = request.form.get("company", "").strip()
-    mode = request.form.get("mode", "grounding")
 
     if not university or len(university) > 160:
         flash("Enter a university or college name.", "error")
@@ -309,10 +308,8 @@ def discover():
         pages = max(1, min(5, int(request.form.get("pages", 3))))
     except ValueError:
         pages = 3
-    if mode == "xray":
-        params["pages"] = str(pages)
-    scheme = "xray" if mode == "xray" else "discover"
-    target = f"{scheme}://?{urlencode(params)}"
+    params["pages"] = str(pages)
+    target = f"xray://?{urlencode(params)}"   # LinkedIn X-Ray is the only discovery method now
     return _queue_job(target, f"Searching for '{university}' alumni. New people will appear under Waiting when it finishes.")
 
 
