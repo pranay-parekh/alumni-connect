@@ -331,7 +331,7 @@ def import_file():
         )
         flash(
             f"Imported {added} pending profile{'s' if added != 1 else ''} from {upload.filename} "
-            f"(skipped {skipped} duplicate{'s' if skipped != 1 else ''}).",
+            f"(skipped {skipped} duplicate or invalid row{'s' if skipped != 1 else ''}).",
             "success",
         )
     except Exception as e:

@@ -68,6 +68,10 @@ CHUNK_CHARS = 20000          # size of each piece of text sent to the AI in loca
 MAX_CHUNKS_PER_PAGE = 6      # safety limit so one huge page can't cost too much
 MAX_PAGES = 5                # how many "Next" pages to follow per site
 REQUEST_TIMEOUT_MS = 320_000
+XRAY_BATCH = max(1, int(os.getenv("XRAY_BATCH", "10")))   # LinkedIn snippets sent to Gemini per request
+XRAY_TRIES = int(os.getenv("GEMINI_TRIES", "2"))   # attempts per X-Ray batch (every attempt may count toward your quota)
+FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "")  # optional: tried on every 2nd attempt, e.g. when MODEL is overloaded
+XRAY_TIMEOUT_MS = int(float(os.getenv("XRAY_TIMEOUT_SECONDS", "150")) * 1000)   # then use the local parser
 TRIES = 3                    # Gemini is asked up to 3 times if it fails
 
 HEADERS = {
@@ -106,7 +110,7 @@ class ConfigError(ScrapeError):
 # ==============================================================================
 # Shared Gemini Client & Record Helpers
 # ==============================================================================
-def _client():
+def _client(timeout_ms: int = REQUEST_TIMEOUT_MS):
     """Create the Gemini client. google-genai is imported here, not at the top,
     so the website still starts even if the package is missing."""
     key = os.getenv("GEMINI_API_KEY")
@@ -117,7 +121,7 @@ def _client():
         from google.genai import types
     except ImportError:
         raise ConfigError("The google-genai package is not installed (pip install --user google-genai).")
-    return genai.Client(api_key=key, http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS))
+    return genai.Client(api_key=key, http_options=types.HttpOptions(timeout=timeout_ms))
 
 
 def _text(value) -> Optional[str]:
@@ -134,6 +138,33 @@ def _plain_name(name) -> str:
     return re.sub(r"^(?:(?:mr|mrs|ms|dr|prof|maj)(?:\.\s*|\s+))+", "", name, flags=re.I).strip().lower()
 
 
+_DEGREE_ROLE_RE = (
+    r"^\s*(?:bachelor|master)(?:'?s)?\s+(?:of|in|degree)\b|"
+    r"^\s*(?:mba|bca|mca|b\.?\s?tech|m\.?\s?tech|b\.?\s?sc|m\.?\s?sc|ph\.?d|diploma)\b|"
+    r"^\s*(?:b\.?\s?e|m\.?\s?e)\.?\s*(?:$|\(|-|in\b)|"
+    r"^\s*(?:b\.?\s?e|m\.?\s?e)\.?\s+(?:in\s+)?(?:computer|cse|ece|eee|mech|civil|it\b|information|electronics|"
+    r"electrical|science|biomedical|chemical|aero|automobile|artificial|data)"
+)
+
+
+def _tidy_role(role: Optional[str], company: Optional[str]):
+    """'Associate consultant @Astutech ...' -> role 'Associate consultant', company 'Astutech'."""
+    if not role:
+        return role, company
+    role = re.sub(r"^[^\w(]+", "", role)                      # leading emoji / symbols
+    if re.search(_DEGREE_ROLE_RE, role, flags=re.I):           # a degree, not a job title
+        return None, company
+    role = re.sub(r"\s*(?:\.{3}|\u2026)\s*$", "", role).strip()  # Google's "..." cut-off
+    role = re.sub(r"\s+(?:@|at)\s*$", "", role, flags=re.I).strip()   # dangling "At"
+    m = re.search(r"\s+(?:@\s*|at\s+)(\S.*)$", role, flags=re.I)
+    if m:
+        cand = m.group(1).split("|")[0].strip(" .")
+        role = role[:m.start()].strip()
+        if cand and not company:
+            company = cand
+    return role or None, company
+
+
 def clean_record(raw) -> Optional[dict]:
     """One alumnus from Gemini or CSV/JSON -> a tidy dict, or None if it isn't usable."""
     if not isinstance(raw, dict):
@@ -147,6 +178,7 @@ def clean_record(raw) -> Optional[dict]:
     }
     if not record["role"] and raw.get("job_role"):
         record["role"] = _text(raw.get("job_role"))
+    record["role"], record["company"] = _tidy_role(record["role"], record["company"])
     record["name"] = name
     return record
 
@@ -255,7 +287,14 @@ def ask_gemini(url: str, log: Callable = print) -> tuple[list[dict], Optional[st
             problem = _retrieval_problem(response)
             if problem:
                 raise ScrapeError(problem)
-            data = _parse_json(response.text)
+            try:
+                data = _parse_json(response.text)
+            except ScrapeError as parse_error:
+                log(f"  Attempt {attempt}: {parse_error}")
+                if attempt == TRIES:
+                    raise
+                time.sleep(attempt * 3)
+                continue
             people = [p for p in (clean_record(r) for r in data.get("alumni") or []) if p]
             next_url = _text(data.get("next_page_url"))
             if next_url:
@@ -314,10 +353,12 @@ def fetch_html(url: str, log: Callable = print) -> str:
 
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.goto(url, wait_until="networkidle", timeout=30000)
-                html = page.content()
-                browser.close()
+                try:
+                    page = browser.new_page()
+                    page.goto(url, wait_until="networkidle", timeout=30000)
+                    html = page.content()
+                finally:
+                    browser.close()
         except Exception as e:
             log(f"  (Playwright fallback unavailable: {e})")
 
@@ -334,8 +375,13 @@ def clean_text(html: str) -> str:
 
 
 def looks_like_login_page(text: str) -> bool:
-    start = text[:200].lower()
-    return "linkedin" in start and ("sign up" in start or "sign in" in start)
+    """True for a login/sign-up wall on any site (LinkedIn, Facebook, a portal...)."""
+    start = text[:300].lower()
+    if "linkedin" in start and ("sign up" in start or "sign in" in start):
+        return True
+    # A real directory page has lots of text; a login wall has very little.
+    login_words = ("sign in", "log in", "login", "password")
+    return len(text) < 1500 and any(w in start for w in login_words)
 
 
 def split_text(text: str, size: int = CHUNK_CHARS) -> list[str]:
@@ -351,10 +397,15 @@ def split_text(text: str, size: int = CHUNK_CHARS) -> list[str]:
     return chunks[:MAX_CHUNKS_PER_PAGE]
 
 
-def from_llm(text: str, log: Callable = print, extra_instruction: str = "", tries: int = TRIES) -> list[dict]:
+def from_llm(text: str, log: Callable = print, extra_instruction: str = "", tries: int = TRIES,
+             timeout_ms: int = REQUEST_TIMEOUT_MS, strict: bool = False) -> list[dict]:
+    """Ask Gemini to extract alumni. strict=True raises ScrapeError when Gemini fails, so the
+    caller can tell "Gemini broke" apart from "Gemini found nobody" (default: return [])."""
     try:
-        client = _client()
+        client = _client(timeout_ms)
     except ConfigError as e:
+        if strict:
+            raise
         log(f"  Error: {e}")
         return []
 
@@ -382,22 +433,25 @@ def from_llm(text: str, log: Callable = print, extra_instruction: str = "", trie
     if AlumniBatch is not None:
         config_kwargs["response_schema"] = AlumniBatch
 
+    last_message = "unknown error"
     for attempt in range(1, max(1, tries) + 1):
         try:
             response = client.models.generate_content(
-                model=MODEL,
+                model=FALLBACK_MODEL if (FALLBACK_MODEL and attempt % 2 == 0) else MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(**config_kwargs),
             )
             data = _parse_json(response.text)
             return [p for p in (clean_record(r) for r in data.get("alumni", [])) if p]
         except Exception as e:
-            message = str(e).replace(os.getenv("GEMINI_API_KEY", "\0"), "***")
-            log(f"  Gemini attempt {attempt} failed: {message[:300]}")
+            last_message = str(e).replace(os.getenv("GEMINI_API_KEY", "\0"), "***")
+            log(f"  Gemini attempt {attempt} failed: {last_message[:300]}")
             if attempt < tries:
                 wait = attempt * 10
                 log(f"  Retrying in {wait} seconds...")
                 time.sleep(wait)
+    if strict:
+        raise ScrapeError(last_message[:200])
     return []
 
 
@@ -427,6 +481,7 @@ def find_next_url(html: str, current_url: str) -> Optional[str]:
 
 def scrape_page(url: str, log: Callable = print) -> tuple[list[dict], str]:
     """Local mode: get the alumni from ONE page. Returns (people, html)."""
+    _client()  # raises a clear ConfigError now if the API key / package is missing
     html = fetch_html(url, log=log)
 
     text = clean_text(html)
@@ -436,6 +491,8 @@ def scrape_page(url: str, log: Callable = print) -> tuple[list[dict], str]:
         return [], html
 
     people: list[dict] = []
+    if len(text) > CHUNK_CHARS * MAX_CHUNKS_PER_PAGE:
+        log(f"  Page is very long; only the first {MAX_CHUNKS_PER_PAGE} chunks are read.")
     for i, chunk in enumerate(split_text(text), start=1):
         log(f"  Sending chunk {i} to Gemini...")
         found = [p for p in from_llm(chunk, log=log) if looks_real(p, text)]
@@ -507,7 +564,7 @@ def discover_by_university(
     if source_urls:
         combined += "\n\nGrounded source URLs:\n" + "\n".join(source_urls)
 
-    people = [
+    extracted = [
         p for p in from_llm(
             combined,
             log=log,
@@ -515,6 +572,10 @@ def discover_by_university(
         )
         if looks_real(p, grounded_text)
     ]
+    # looks_real() only checks Gemini's own text, so also require a real web link as evidence.
+    people = [p for p in extracted if (p.get("profile_url") or "").startswith(("http://", "https://"))]
+    if len(people) < len(extracted):
+        log(f"  Dropped {len(extracted) - len(people)} people that had no source URL.")
 
     if out_file:
         with open(out_file, "w", encoding="utf-8") as f:
@@ -531,20 +592,47 @@ def discover_by_university(
 _STAFF_ROLE_WORDS = (
     "professor", "lecturer", "vice chancellor", "vice-chancellor", "pro vice",
     "dean", "registrar", "faculty", "librarian", "lab assistant", "teaching assistant",
-    "hod", "head of department", "principal", "director of admissions", "placement officer",
+    "head of department", "director of admissions", "placement officer",
+    "controller of examinations", "exam cell",
 )
 _STUDENT_ROLE_WORDS = (
     "student", "undergraduate", "postgraduate", "pursuing", "aspiring", "fresher", "intern at",
 )
 _ORG_NAME_WORDS = (
     "university", "college", "school of", "department of", "institute of", "faculty of",
-    "alumni association", "placement cell", "club", "official", "ruas",
+    "alumni association", "placement cell", "club", "official",
 )
+
+
+def _has_word(words, text: str) -> bool:
+    """True if any word/phrase appears as a WHOLE word ('hod' must not match 'methodology')."""
+    return any(re.search(rf"\b{re.escape(w)}\b", text) for w in words)
 
 
 def _norm_tokens(text: str) -> set[str]:
     stop = {"of", "and", "the", "in", "at", "for", "m", "s"}
     return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(w) > 1 and w not in stop}
+
+
+def _acronym(university: str) -> str:
+    """'Sri Krishna College of Engineering and Technology' -> 'skcet' (needs 3+ real words)."""
+    words = [w for w in re.findall(r"[A-Za-z]+", university or "") if w.lower() not in {"of", "and", "the", "for", "in"}]
+    return "".join(w[0] for w in words).lower() if len(words) >= 3 else ""
+
+
+def _mentions_university(text: str, university: str) -> bool:
+    """True if the text names this exact university (or its acronym), not a similar-sounding one
+    such as 'Sri Krishna College of TECHNOLOGY' when we asked for '... of ENGINEERING and Technology'."""
+    norm = lambda t: " ".join(re.findall(r"[a-z0-9]+", (t or "").lower().replace("&", " and ")))
+    acr = _acronym(university)
+    return norm(university) in norm(text) or bool(acr and re.search(rf"\b{acr}\b", norm(text)))
+
+
+_CURRENT_STUDENT_RE = (
+    r"\b\d(?:st|nd|rd|th)\s+year\b|\bfinal[- ]year\b|\bpre-?final\b|"
+    r"\bpursuing\s+(?:my\s+|a\s+|an\s+|the\s+)?(?:integrated\s+)?"
+    r"(?:m\.?\s?tech|b\.?\s?tech|b\.?\s?e\b|m\.?\s?e\b|mba|master|bachelor|ph\.?d|diploma|degree)"
+)
 
 
 def _same_org(text: Optional[str], university: str) -> bool:
@@ -572,6 +660,14 @@ _DEPT_PATTERNS = [
     (r"\b(food\s+technology)", "Food Technology"),
     (r"\b(pharmaceutics|pharmacy|pharma\b)", "Pharmacy"),
     (r"\b(mba\b|business\s+administration|management\s+studies)", "Management"),
+    # General fields (kept last so the specific patterns above win)
+    (r"\b(chemical\s+engineering)", "Chemical Engineering"),
+    (r"\b(architecture)", "Architecture"),
+    (r"\b(commerce|accounting|accountancy)\b", "Commerce and Finance"),
+    (r"\b(law|llb|llm)\b", "Law"),
+    (r"\b(medicine|mbbs|nursing)\b", "Medicine and Health Sciences"),
+    (r"\b(economics)", "Economics"),
+    (r"\b(?:fashion|interior|graphic|industrial|product|ux|ui)\s+design\b|\bdesign\s+(?:school|studies)\b", "Design"),
 ]
 
 _SKILL_KEYWORDS = [
@@ -581,8 +677,8 @@ _SKILL_KEYWORDS = [
     ("Node.js", r"\bnode\.?\s*js\b"),
     ("React", r"\breact(?:\.?js)?\b"),
     ("SQL", r"\b(?:oracle\s+sql|mysql|postgresql|sql)\b"),
-    ("JDBC", r"\bjdbc\b"),
-    ("Hibernate", r"\bhibernate\b"),
+    ("C++", r"c\+\+"),
+    ("DevOps", r"\bdevops\b"),
     ("Machine Learning", r"\bmachine\s+learning\b|\bml\b"),
     ("Data Science", r"\bdata\s+science\b"),
     ("Data Analysis", r"\bdata\s+analy(?:sis|tics|st)\b"),
@@ -592,19 +688,58 @@ _SKILL_KEYWORDS = [
     ("Product Management", r"\bproduct\s+(?:manager|management|owner)\b"),
     ("Cybersecurity", r"\bcyber\s*security\b"),
     ("VLSI", r"\bvlsi\b"),
-    ("MBD", r"\bmbd\b"),
     ("R&D", r"\br&d\b"),
-    ("Operations", r"\boperations\b"),
-    ("ITIL", r"\bitil\b"),
+    ("Marketing", r"\bmarketing\b"),
+    ("Finance", r"\bfinance\b|\bfinancial\b"),
+    ("Sales", r"\bsales\b"),
     ("QA", r"\bquality\s+assurance\b|\bqa\b"),
 ]
 
 
+_EDU_WORDS = (
+    r"\b(?:education|b\.?\s?tech|b\.?\s?e|m\.?\s?tech|bachelor\w*|master\w*|b\.?\s?sc|m\.?\s?sc|mba|phd|"
+    r"diploma|degree|graduat\w*|class\s+of|batch\s+of|alumn\w*|university|college|institute)\b"
+)
+
+
+def _education_windows(text: str) -> list[str]:
+    """Pieces of text that start at an education word (B.Tech, University, 'Class of'...).
+    Departments and years are only trusted here, so a job title like 'Mechanical Design
+    Engineer' or a job date like 'Since 2019' is not mistaken for the degree."""
+    text = text or ""
+    return [text[m.start(): m.start() + 140] for m in re.finditer(_EDU_WORDS, text, flags=re.I)]
+
+
+_DEPT_ALIASES = {
+    "cse": "Computer Science and Engineering", "cs": "Computer Science and Engineering",
+    "computer science": "Computer Science and Engineering",
+    "computer science engineering": "Computer Science and Engineering",
+    "it": "Information Technology", "ece": "Electronics and Communication Engineering",
+    "eee": "Electrical and Electronics Engineering", "mech": "Mechanical Engineering",
+    "mechanical": "Mechanical Engineering", "civil": "Civil Engineering", "mba": "Management",
+}
+for _pat, _label in _DEPT_PATTERNS:
+    _DEPT_ALIASES[_label.lower()] = _label
+
+
+def canonical_department(value) -> Optional[str]:
+    """'CSE', 'Dept. of Computer Science & Engineering' -> one spelling, so the search filter
+    does not show the same department three times. Unknown names are kept exactly as written."""
+    text = _text(value)
+    if not text:
+        return None
+    key = text.lower().replace("&", " and ").replace(".", "").replace(",", " ")
+    key = re.sub(r"\b(?:department|dept)\s+of\b", " ", key)
+    key = re.sub(r"\s+", " ", key).strip()
+    return _DEPT_ALIASES.get(key, text)
+
+
 def _extract_department(text: str) -> Optional[str]:
-    low = (text or "").lower()
-    for pat, label in _DEPT_PATTERNS:
-        if re.search(pat, low):
-            return label
+    for window in _education_windows(text):
+        low = window.lower()
+        for pat, label in _DEPT_PATTERNS:
+            if re.search(pat, low):
+                return label
     return None
 
 
@@ -620,12 +755,21 @@ def _extract_skills(text: str) -> Optional[str]:
 
 
 def _extract_grad_year(text: str) -> Optional[str]:
-    """Prefer the end year of a degree range (e.g. '2021 - 2025' -> '2025') over a lone year."""
-    rng = re.search(r"\b(199\d|20[0-2]\d)\s*[-\u2013\u2014]\s*(199\d|20[0-2]\d)\b", text or "")
-    if rng:
-        return rng.group(2)
-    single = re.search(r"\b(199\d|20[0-2]\d)\b", text or "")
-    return single.group(1) if single else None
+    """Prefer the end year of a degree range ('2021 - 2025' -> '2025'), only near education words."""
+    windows = _education_windows(text)
+    for window in windows:
+        rng = re.search(r"\b(19[89]\d|20[0-3]\d)\s*[-\u2013\u2014]\s*(19[89]\d|20[0-3]\d)\b", window)
+        if rng:
+            return rng.group(2)
+    for window in windows:
+        single = re.search(r"\b(19[89]\d|20[0-3]\d)\b", window)
+        if single:
+            return single.group(1)
+    for window in windows:            # "... College of Engineering '27" = class of 2027
+        short = re.search(r"['\u2019]((?:0\d|[123]\d))\b", window)
+        if short:
+            return str(2000 + int(short.group(1)))
+    return None
 
 
 def _is_university_employee_in_snippet(snippet: str, university: str) -> bool:
@@ -643,53 +787,88 @@ def _is_university_employee_in_snippet(snippet: str, university: str) -> bool:
     for m in re.finditer(r"([^·\n]{5,90})\bPresent\b", snippet, flags=re.I):
         if _same_org(m.group(1), university):
             return True
+    acr = _acronym(university)
+    if acr and re.search(rf"(?:\bat\b|@)\s*{acr}\b", snippet, flags=re.I):
+        return True
     # Check "Consultant to ... <University>" or "Professor. <University>"
-    if re.search(r"\b(associate\s+professor|assistant\s+professor|professor|lecturer|legal\s+consultant\s+to|academician)\b", snippet, flags=re.I):
-        if _same_org(snippet, university):
+    for m in re.finditer(r"\b(associate\s+professor|assistant\s+professor|professor|lecturer|legal\s+consultant\s+to|academician)\b", snippet, flags=re.I):
+        window = snippet[max(0, m.start() - 60): m.end() + 90]
+        if _same_org(window, university):
             return True
     return False
 
 
-def _is_actual_alumni(person: dict, university: str, raw_snippet: str = "") -> bool:
-    """Filter out current students, university staff/faculty, and official department/club pages."""
+def _supported_department(gemini_dept: Optional[str], snippet: str, default: Optional[str]) -> Optional[str]:
+    """Gemini sometimes GUESSES a department (e.g. 'Computer Science' from 'College of Engineering').
+    Use a department only if the snippet really says it; otherwise the department the admin searched for."""
+    found = _extract_department(snippet)
+    if found:
+        return found
+    if gemini_dept:
+        generic = {"engineering", "science", "sciences", "technology", "department", "studies"}
+        words = _norm_tokens(gemini_dept) - generic
+        if words and all(w in snippet.lower() for w in words):
+            return gemini_dept
+    return default
+
+
+def _reject_reason(person: dict, university: str, raw_snippet: str = "") -> Optional[str]:
+    """Why this person is NOT a working alumnus (None = looks like a real alumnus).
+    Filters out current students, university staff/faculty, and official department/club pages."""
     name = (person.get("name") or "").strip()
     role = (person.get("role") or "").strip()
     company = (person.get("company") or "").strip()
-    bio = (person.get("bio") or raw_snippet or "").strip()
+    bio = f"{person.get('bio') or ''} {raw_snippet or ''}".strip()
 
     name_l, role_l, bio_l = name.lower(), role.lower(), bio.lower()
 
-    # 1. Reject official school/club/university pages posing as profiles
-    if any(w in name_l for w in _ORG_NAME_WORDS) or _same_org(name, university):
-        return False
+    # 1. Official school/club/university pages posing as profiles
+    if _has_word(_ORG_NAME_WORDS, name_l) or _same_org(name, university):
+        return "official page"
 
-    # 2. Reject current students (role or snippet headline says "Student at ...")
-    if any(w in role_l for w in _STUDENT_ROLE_WORDS):
-        return False
+    # 2. Current students: role or snippet says "Student at ...", "4th year", "pursuing ...",
+    #    or the graduation year (2027, '27) is still in the future
+    if _has_word(_STUDENT_ROLE_WORDS, role_l):
+        return "student"
     if re.search(r"\bstudent\s+at\b", bio_l):
-        return False
+        return "student"
+    if re.search(_CURRENT_STUDENT_RE, f"{role_l} {bio_l}"):
+        return "student"
+    this_year = time.localtime().tm_year
+    for y in (str(person.get("batch_year") or ""), _extract_grad_year(bio) or ""):
+        if y.isdigit() and int(y) > this_year:
+            return "student (not graduated yet)"
 
-    # 3. Reject faculty / university administration / academicians
-    if any(w in role_l for w in _STAFF_ROLE_WORDS) or "academician" in (company or "").lower():
-        return False
+    # 3. Faculty / university administration / academicians
+    if _has_word(_STAFF_ROLE_WORDS, role_l) or "academician" in (company or "").lower():
+        return "university staff"
     if re.search(r"\b(professor|vice[ -]chancellor|assistant professor|associate professor|lecturer|dean)\s+(at|in|·|\.)", bio_l):
-        return False
+        return "university staff"
 
-    # 4. Reject people whose current employer (or parsed role) is the university itself
-    if _same_org(company, university) or _same_org(role, university):
-        return False
+    # 4. Current employer (or parsed role) is the university itself
+    acr = _acronym(university)
+    if _same_org(company, university) or _same_org(role, university) or (acr and company.lower() == acr):
+        return "works at the university"
     if _is_university_employee_in_snippet(bio, university):
-        return False
+        return "works at the university"
 
-    # 5. Require at least a real role or external company
+    # 5. Need at least a real role or an external company
     if not role and not company:
-        return False
+        return "no job details"
+    return None
 
-    return True
+
+def _is_actual_alumni(person: dict, university: str, raw_snippet: str = "") -> bool:
+    return _reject_reason(person, university, raw_snippet) is None
+
+
+def _count(stats: Optional[dict], reason: str) -> None:
+    if stats is not None:
+        stats[reason] = stats.get(reason, 0) + 1
 
 
 def _parse_linkedin_snippets_fallback(
-    items: list[dict], university: str, default_dept: Optional[str] = None
+    items: list[dict], university: str, default_dept: Optional[str] = None, stats: Optional[dict] = None
 ) -> list[dict]:
     """Parse 'Name - Role - Company | LinkedIn' titles & snippets directly if Gemini is unavailable."""
     people = []
@@ -752,9 +931,20 @@ def _parse_linkedin_snippets_fallback(
             "bio": snippet[:280] if snippet else None,
             "profile_url": link or None,
         })
-        if rec and _is_actual_alumni(rec, university, raw_snippet=snippet):
+        if not rec:
+            continue
+        reason = _reject_reason(rec, university, raw_snippet=snippet)
+        if reason:
+            _count(stats, reason)
+        else:
             people.append(rec)
     return people
+
+
+def _link_key(link: str) -> str:
+    """in.linkedin.com/in/x/?utm=1 and www.linkedin.com/in/x are the same profile."""
+    link = link.split("?")[0].split("#")[0].rstrip("/").lower()
+    return re.sub(r"^https?://[a-z]{2,3}\.linkedin\.com", "https://www.linkedin.com", link)
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -764,12 +954,13 @@ def _fmt_elapsed(seconds: float) -> str:
     return f"{mins}m {rem}s"
 
 
-_DEFAULT_ROLE_QUERIES = [
-    "Software Engineer",
-    "Data Analyst",
-    "Developer",
-    "Product Manager",
+# Broad job words so this works for any field. Override with XRAY_ROLES="Doctor,Lawyer,..." in .env.
+_DEFAULT_ROLE_QUERIES = [r.strip() for r in os.getenv("XRAY_ROLES", "").split(",") if r.strip()] or [
+    "Engineer",
+    "Manager",
+    "Analyst",
     "Consultant",
+    "Developer",
 ]
 
 
@@ -802,6 +993,12 @@ def xray_search_alumni(
     per_page = max(1, min(10, int(num_results or 10)))
     univ_clean = university.strip()
 
+    # Words to leave OUT of the Google search, so students and faculty do not fill the 10 results.
+    # Change with XRAY_EXCLUDE=student,professor in .env (set it to nothing to turn this off).
+    exclude = "".join(f" -{w.strip()}" for w in os.getenv("XRAY_EXCLUDE", "student,professor,lecturer").split(",") if w.strip())
+    # The "names the exact school" check needs a full name; an acronym like MSRUAS cannot be checked
+    check_school = len(re.findall(r"[A-Za-z]+", univ_clean)) >= 3
+
     # Build a list of (query_str, page_num) requests to execute
     plan: list[tuple[str, int]] = []
     if department or company:
@@ -810,14 +1007,15 @@ def xray_search_alumni(
             base_parts.append(department.strip())
         if company:
             base_parts.append(company.strip())
-        base_q = " ".join(base_parts)
+        base_q = " ".join(base_parts) + exclude
         plan = [(base_q, p) for p in range(1, pages + 1)]
     else:
         # Spread across distinct working-alumni role queries (10 results each, page 1)
         for role_kw in _DEFAULT_ROLE_QUERIES[:pages]:
-            plan.append((f'site:linkedin.com/in "{univ_clean}" {role_kw}', 1))
+            plan.append((f'site:linkedin.com/in "{univ_clean}" {role_kw}{exclude}', 1))
 
     all_items: list[dict] = []
+    off_target = 0
     seen_links: set[str] = set()
     pages_fetched = 0
 
@@ -849,44 +1047,85 @@ def xray_search_alumni(
         pages_fetched += 1
         for item in items:
             link = (item.get("link") or "").strip()
-            if link and link not in seen_links:
-                seen_links.add(link)
+            if check_school and not _mentions_university(f"{item.get('title', '')} {item.get('snippet', '')}", univ_clean):
+                off_target += 1
+                continue
+            if link and _link_key(link) not in seen_links:
+                seen_links.add(_link_key(link))
                 all_items.append(item)
         if idx < len(plan):
             time.sleep(0.3)
 
-    # Step 2: Parse & filter (single fast Gemini pass with tries=1, instant fallback if 429/504)
+    if off_target:
+        log(f"  Skipped {off_target} results that do not name {univ_clean} (probably a different school).")
+
+    # Step 2: Parse & filter. Gemini gets small batches (a 50-snippet request is slow and can time
+    # out). If Gemini fails on a batch, that batch uses the local parser and Gemini is switched off
+    # for the rest of this search, so a broken Gemini never makes the job wait minutes.
     all_people: list[dict] = []
     if all_items:
-        log(f"  Fetched {len(all_items)} unique LinkedIn results across {pages_fetched} batch(es). Extracting alumni...")
-        blocks = [
-            f"Title: {item.get('title', '')}\nURL: {item.get('link', '')}\nSnippet: {item.get('snippet', '')}"
-            for item in all_items
-        ]
-        combined = "\n\n---\n\n".join(blocks)
-        snippet_by_url = {(item.get("link") or "").strip(): (item.get("snippet") or "") for item in all_items}
-
-        llm_people = [
-            p for p in from_llm(
-                combined,
-                log=log,
-                tries=1,
-                extra_instruction=(
-                    f"Each block is a LinkedIn search snippet for alumni of '{univ_clean}'. "
-                    "ONLY include graduated alumni currently working at an external company. "
-                    "SKIP current students ('Student at ...'), university faculty/professors/staff/vice-chancellors, "
-                    "and official college/department/club pages. Copy the exact URL into profile_url."
-                ),
+        n_batches = (len(all_items) + XRAY_BATCH - 1) // XRAY_BATCH
+        log(f"  Fetched {len(all_items)} unique LinkedIn results across {pages_fetched} search(es). Extracting alumni...")
+        snippet_by_key = {_link_key(i.get("link") or ""): (i.get("snippet") or "") for i in all_items}
+        gemini_ok = True
+        for b in range(n_batches):
+            batch = all_items[b * XRAY_BATCH:(b + 1) * XRAY_BATCH]
+            batch_text = "\n\n---\n\n".join(
+                f"Title: {i.get('title', '')}\nURL: {i.get('link', '')}\nSnippet: {i.get('snippet', '')}" for i in batch
             )
-            if looks_real(p, combined)
-            and _is_actual_alumni(p, univ_clean, raw_snippet=snippet_by_url.get(p.get("profile_url") or "", ""))
-        ]
-
-        if llm_people:
-            all_people = merge_people([], llm_people)
-        else:
-            log("  Using fast local LinkedIn snippet parser...")
-            all_people = merge_people([], _parse_linkedin_snippets_fallback(all_items, univ_clean, default_dept=department))
+            people = None
+            stats: dict = {}
+            if gemini_ok:
+                try:
+                    returned = [
+                        p for p in from_llm(
+                            batch_text,
+                            log=log,
+                            tries=XRAY_TRIES,
+                            timeout_ms=XRAY_TIMEOUT_MS,
+                            strict=True,
+                            extra_instruction=(
+                                f"Each block is a LinkedIn search snippet for alumni of '{univ_clean}'. "
+                                "ONLY include graduated alumni currently working at an external company. "
+                                "SKIP current students ('Student at ...', '4th year', 'pursuing ...'), university "
+                                "faculty/professors/staff/vice-chancellors, and official college/department/club pages. "
+                                "company = the CURRENT employer named in the headline or the 'Experience:' line; "
+                                "role = the current job title only. Set bio to null. "
+                                "Copy the exact URL into profile_url."
+                            ),
+                        )
+                    ]
+                    people = []
+                    for p in returned:
+                        if not looks_real(p, batch_text):
+                            _count(stats, "name not in the snippet")
+                            continue
+                        reason = _reject_reason(p, univ_clean, snippet_by_key.get(_link_key(p.get("profile_url") or ""), ""))
+                        if reason:
+                            _count(stats, reason)
+                        else:
+                            people.append(p)
+                except ScrapeError as e:
+                    log(f"  Batch {b + 1}/{n_batches}: Gemini failed ({str(e)[:120]}). Using the local parser from here on.")
+                    gemini_ok = False
+            used_gemini = people is not None
+            if people is None:
+                people = _parse_linkedin_snippets_fallback(batch, univ_clean, default_dept=department, stats=stats)
+            else:
+                for p in people:  # keep the search snippet as evidence for the admin reviewing it
+                    snippet = snippet_by_key.get(_link_key(p.get("profile_url") or ""), "")
+                    p["bio"] = p.get("bio") or (snippet[:280] or None)
+                    p["department"] = _supported_department(p.get("department"), snippet, department)
+                    year = str(p.get("batch_year") or "")
+                    if not (year and year in snippet):
+                        p["batch_year"] = _extract_grad_year(snippet)
+            all_people = merge_people(all_people, people)
+            other = len(batch) - len(people) - sum(stats.values())
+            if other > 0:
+                stats["left out by Gemini (not an alumnus, or unclear)" if used_gemini else "unreadable result"] = other
+            why = "; skipped: " + ", ".join(f"{n} {r}" for r, n in stats.items()) if stats else ""
+            log(f"  Batch {b + 1}/{n_batches}: kept {len(people)} of {len(batch)} results "
+                f"({'Gemini' if used_gemini else 'local parser'}){why}.")
 
     if out_file:
         with open(out_file, "w", encoding="utf-8") as f:
@@ -911,7 +1150,8 @@ def save(people: list[dict], source_url: str, db_path: str = DB_PATH) -> int:
             f"SELECT name, batch_year, source_url FROM {TABLE}"
         ).fetchall()
         seen_pairs = {(_plain_name(r[0]), r[1]) for r in existing_rows}
-        seen_urls = {(_plain_name(r[0]), r[2]) for r in existing_rows if r[2]}
+        # Labels like "admin_upload" are shared by every row, so only real links count here.
+        seen_urls = {(_plain_name(r[0]), r[2]) for r in existing_rows if r[2] and str(r[2]).startswith("http")}
 
         for p in merge_people([], people):       # drops repeats within the same batch
             plain = _plain_name(p["name"])
@@ -921,7 +1161,8 @@ def save(people: list[dict], source_url: str, db_path: str = DB_PATH) -> int:
 
             if (plain, row_source) in seen_urls or (plain, year) in seen_pairs:
                 continue
-            seen_urls.add((plain, row_source))
+            if row_source.startswith("http"):
+                seen_urls.add((plain, row_source))
             seen_pairs.add((plain, year))
 
             filled = sum(bool(p.get(k)) for k in ("role", "company", "department", "batch_year", "skills"))
@@ -930,7 +1171,7 @@ def save(people: list[dict], source_url: str, db_path: str = DB_PATH) -> int:
                 f"INSERT INTO {TABLE} "
                 "(name, company, job_role, department, batch_year, skills, bio, source_url, "
                 "raw_designation, match_confidence, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-                (p["name"], p.get("company"), p.get("role"), p.get("department"),
+                (p["name"], p.get("company"), p.get("role"), canonical_department(p.get("department")),
                  year, p.get("skills"), p.get("bio"), row_source, p.get("role"), conf),
             )
             added += 1
@@ -967,7 +1208,7 @@ def import_from_file_content(
 
     cleaned = [p for p in (clean_record(r) for r in raw_records) if p]
     added = save(cleaned, source_label, db_path=db_path)
-    skipped = max(0, len(cleaned) - added)
+    skipped = max(0, len(raw_records) - added)
     return added, skipped
 
 
@@ -1046,12 +1287,8 @@ def scrape(
             saved += new
             log(f"  Found {len(people)} people, saved {new} new rows")
 
-        if resolved_mode == "local":
-            if not next_url or next_url in visited:
-                break
-        else:
-            if not next_page_ok(next_url, start_url, visited):
-                break
+        if not next_page_ok(next_url, start_url, visited):
+            break
 
         url = next_url
         time.sleep(1)
@@ -1160,7 +1397,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Scrape or discover alumni into alumni.db.")
-    parser.add_argument("urls", nargs="*", help="College directory URLs to scrape")
+    parser.add_argument("urls", nargs="*", help="Alumni directory / people-page URLs to scrape (any university or company site)")
     parser.add_argument("--auto", action="store_const", const="auto", dest="mode")
     parser.add_argument("--local", action="store_const", const="local", dest="mode")
     parser.add_argument("--gemini", action="store_const", const="gemini", dest="mode")
@@ -1169,9 +1406,11 @@ if __name__ == "__main__":
     parser.add_argument("--xray", help="Discover alumni by university name (LinkedIn X-Ray CSE)")
     parser.add_argument("--dept", help="Optional department filter for --discover / --xray")
     parser.add_argument("--company", help="Optional company filter for --discover / --xray")
-    parser.add_argument("--pages", type=int, default=3, help="Pages to fetch for --xray (1-5, ~20 results/page)")
+    parser.add_argument("--pages", type=int, default=3, help="Searches to run for --xray (1-5, 10 results each)")
     parser.add_argument("--out", help="Export scraped/discovered records to a JSON file instead of DB")
     args = parser.parse_args()
+    if args.out and len(args.urls) > 1:
+        parser.error("--out works with one URL at a time (each URL would overwrite the same file).")
 
     if args.discover:
         t0 = time.monotonic()

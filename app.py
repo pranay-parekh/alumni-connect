@@ -27,7 +27,7 @@ DB_PATH = os.path.join(BASE_DIR, "alumni.db")
 
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)   # wait for the scraper instead of "database is locked"
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -61,6 +61,29 @@ def ensure_schema():
                SET verified = NEW.verified, company = NEW.company,
                    job_role = NEW.role, skills = NEW.skills, bio = NEW.bio
              WHERE id = OLD.id;
+        END;
+
+        -- Match score = how complete a profile is. Same formula as save() in scrape_alumni.py
+        -- (0.40 + 0.12 per filled field of role, company, department, batch year, skills; max 0.98).
+        -- Keeping it in the database means EVERY change (admin edit, alumni claiming a profile,
+        -- the scraper) updates the score automatically.
+        CREATE TRIGGER IF NOT EXISTS profile_confidence_update
+        AFTER UPDATE OF job_role, company, department, batch_year, skills ON alumni_profiles
+        BEGIN
+            UPDATE alumni_profiles SET match_confidence = ROUND(MIN(0.98, 0.40 + 0.12 * (
+                (COALESCE(NEW.job_role, '') <> '') + (COALESCE(NEW.company, '') <> '') +
+                (COALESCE(NEW.department, '') <> '') + (COALESCE(NEW.batch_year, 0) <> 0) +
+                (COALESCE(NEW.skills, '') <> ''))), 2)
+             WHERE id = NEW.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS profile_confidence_insert
+        AFTER INSERT ON alumni_profiles WHEN NEW.match_confidence IS NULL
+        BEGIN
+            UPDATE alumni_profiles SET match_confidence = ROUND(MIN(0.98, 0.40 + 0.12 * (
+                (COALESCE(NEW.job_role, '') <> '') + (COALESCE(NEW.company, '') <> '') +
+                (COALESCE(NEW.department, '') <> '') + (COALESCE(NEW.batch_year, 0) <> 0) +
+                (COALESCE(NEW.skills, '') <> ''))), 2)
+             WHERE id = NEW.id;
         END;
         """)
         conn.executescript(JOBS_SCHEMA)   # admin "Scrape a page" history
@@ -342,9 +365,14 @@ def recommend_page():
 # ---------------------------------------------------------------- app set-up
 def create_app():
     app = Flask(__name__)
+    secret = os.getenv("SECRET_KEY")
+    if not secret:
+        raise RuntimeError("SECRET_KEY is not set. Add SECRET_KEY=<long random text> to the .env file "
+                           '(make one with: python -c "import secrets; print(secrets.token_hex(32))").')
     app.config.update(
-        SECRET_KEY=os.getenv("SECRET_KEY", "dev-only-change-me"),
+        SECRET_KEY=secret,
         DATABASE=DB_PATH,
+        MAX_CONTENT_LENGTH=5 * 1024 * 1024,   # the JSON/CSV import cannot be bigger than 5 MB
     )
     CSRFProtect(app)
     ensure_db()        # fresh server with no alumni.db? restore the demo DB first
