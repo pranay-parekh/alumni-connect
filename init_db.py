@@ -3,6 +3,11 @@ import sqlite3
 import random
 from werkzeug.security import generate_password_hash
 
+import os
+if os.path.exists("alumni.db") and "--force" not in sys.argv:
+    sys.exit("alumni.db already exists and this script DROPS the users and alumni_profiles tables. "
+             "Run again with --force if you really want a fresh database.")
+
 conn = sqlite3.connect("alumni.db")
 cur = conn.cursor()
 

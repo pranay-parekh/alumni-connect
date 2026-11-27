@@ -187,7 +187,8 @@ def claim_profile():
                     flash("Profile created. Add your details below.", "success")
             elif pid is None:  # step 1: "This is me" (only unclaimed, scraped rows)
                 cur = conn.execute(
-                    "UPDATE alumni_profiles SET user_id = ? WHERE id = ? AND user_id IS NULL",
+                    "UPDATE alumni_profiles SET user_id = ?, verified = 0 "   # claimed => back to admin review
+                    "WHERE id = ? AND user_id IS NULL AND COALESCE(verified, 0) >= 0",
                     (uid, request.form.get("alumni_id")))
                 flash("Profile linked. Add your details below." if cur.rowcount
                       else "That profile was already claimed.", "success" if cur.rowcount else "error")

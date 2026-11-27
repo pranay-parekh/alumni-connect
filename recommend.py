@@ -28,6 +28,14 @@ BRANCH_ALIASES = {
 }
 STOPWORDS = {"and", "the", "for", "with", "of", "in", "at", "an", "to", "or"}
 
+# Abbreviations spelled out before matching, on BOTH the student and the alumnus side, so
+# "ML" in a student's interests matches "Machine Learning Engineer" (and the other way round).
+ABBREVIATIONS = {
+    "ml": "machine learning", "ai": "artificial intelligence", "dl": "deep learning",
+    "nlp": "natural language processing", "sde": "software engineer", "swe": "software engineer",
+    "js": "javascript", "hr": "human resources", "qa": "quality assurance",
+}
+
 
 # ------------------------------------------------------------------ helpers
 def _stem(word):
@@ -40,6 +48,8 @@ def _stem(word):
 def _words(text, stem=True):
     """'Data Analyst at Acme' -> {'data', 'analy', 'acme'}"""
     found = re.findall(r"[a-z0-9+#]+", (text or "").lower())
+    if stem:   # spell out abbreviations (not for department names, which have BRANCH_ALIASES)
+        found = [part for w in found for part in ABBREVIATIONS.get(w, w).split()]
     return {(_stem(w) if stem else w) for w in found if w not in STOPWORDS}
 
 

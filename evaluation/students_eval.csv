@@ -1,0 +1,21 @@
+student_id,name,branch,skills,interests,notes
+S01,Sample CSE data,CSE,"Python, SQL, Machine Learning","data analyst, machine learning engineer",SAMPLE - replace with real classmates
+S02,Sample CSE web,CSE,"JavaScript, React, Node.js","web developer, software engineer",SAMPLE
+S03,Sample CSE security,CSE,"Cybersecurity, Python, Networking","security analyst",SAMPLE
+S04,Sample CSE java,CSE,"Java, Spring, SQL","software engineer",SAMPLE
+S05,Sample CSE cloud,CSE,"Docker, AWS, Linux","cloud engineer, devops",SAMPLE
+S06,Sample AIML,AIML,"Python, Deep Learning, TensorFlow","ML engineer, research associate",SAMPLE
+S07,Sample ECE,ECE,"C, Embedded Systems, Python","software engineer, embedded engineer",SAMPLE
+S08,Sample ISE analytics,ISE,"SQL, Excel, Power BI","data analyst, business analyst",SAMPLE
+S09,Sample CSE data science,CSE,"Python, Data Mining, Statistics","data scientist, research associate",SAMPLE
+S10,Sample CSE product,CSE,"SQL, Product Strategy, Agile","product manager",SAMPLE
+S11,Sample Pharmacy 1,Pharmacology,"Pharmacology, Data analysis","drug safety associate, clinical data coordinator",SAMPLE
+S12,Sample Pharmacy 2,Pharmaceutics,"Pharmaceutics, R","research scientist, research associate",SAMPLE
+S13,Sample Maths,Mathematics,"Statistics, Python, R","data analyst, research",SAMPLE
+S14,Sample Physics,Physics,"Python, MATLAB","research associate, scientist",SAMPLE
+S15,Sample Commerce,B.Com,"Excel, Accounting","analyst, finance",SAMPLE
+S16,Sample Mechanical,Mechanical,"CAD, Python","engineer, data analyst",SAMPLE
+S17,Sample CSE academia,CSE,"Python, Teaching","lecturer, assistant professor",SAMPLE
+S18,Sample CSE consulting,CSE,"Python, SQL, Excel","consultant, analyst",SAMPLE
+S19,Sample Public Health,Public Health,"Epidemiology, Statistics","public health, research",SAMPLE
+S20,Sample CSE big tech,CSE,"Machine Learning, Cloud","software engineer, Amazon, Google",SAMPLE
